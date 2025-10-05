@@ -12,7 +12,7 @@ my $name = "gesture";
 my $desc = 'Auto-learned pattern';
 my $timeout = 2.0;  # seconds of idle before pattern ends
 my $help = 0;
-my $quantum_s = 0.01;
+my $quantum_s = 0.02;
 
 GetOptions(
     'name|n=s'    => \$name,
@@ -200,10 +200,10 @@ sub analyze_pattern {
     }
     
     $pattern->{durations} = \@durations;
-    $pattern->{analyzed_seq} = durations_to_sequence(\@durations);
+    $pattern->{analyzed_seq} = durations_to_sequence_expansive(\@durations);
 }
 
-sub durations_to_sequence {
+sub durations_to_sequence_broken { # Doesn't record hold time
     my $durations = shift;
     my $seq = '';
     
@@ -231,6 +231,101 @@ sub durations_to_sequence {
     
     return $seq . ')';
 }
+
+sub durations_to_sequence_expansive {
+    my $durations = shift;
+    my $seq = '';
+    
+    for my $d (@$durations) {
+        my $quanta = ceil($d->{duration} / $quantum_s);
+        
+        if ($d->{type} eq 'hold') {
+        	$seq .= '.' x $quanta;
+        	next;
+            if ($quanta <= 3) {
+                $seq .= '.';  # Tap: up to 30ms
+            } elsif ($quanta <= 10) {
+                $seq .= '-';  # Short: 30-100ms  
+            } elsif ($quanta <= 50) {
+                # Medium: 100-500ms, use multiple dashes
+                my $dashes = int($quanta / 10);
+                $seq .= '-' x $dashes;
+            } elsif ($quanta <= 100) {
+                # Long: 500ms-1s, use = signs
+                my $equals = int($quanta / 25);
+                $seq .= '=' x $equals;
+            } else {
+                # Very long: 1s+, show actual count
+                $seq .= sprintf("[%dms]", int($d->{duration} * 1000));
+            }
+        } else {  # pause
+        	$seq .= '~' x $quanta;
+        	next;
+            if ($quanta <= 5) {
+                $seq .= '~';  # Short pause: up to 50ms
+            } elsif ($quanta <= 20) {
+                # Medium pause: 50-200ms
+                my $tildes = int($quanta / 5);
+                $seq .= '~' x $tildes;
+            } elsif ($quanta <= 100) {
+                # Long pause: 200ms-1s
+                my $tildes = int($quanta / 20);
+                $seq .= '~' x min($tildes, 5);
+            } else {
+                # Very long pause: 1s+
+                $seq .= sprintf("{%dms}", int($d->{duration} * 1000));
+            }
+        }
+    }
+    
+    return $seq . ')';
+}
+
+sub durations_to_sequence_represent_bundled {
+    my $durations = shift;
+    my $seq = '';
+    
+    for my $d (@$durations) {
+        my $quanta = ceil($d->{duration} / $quantum_s);
+        
+        if ($d->{type} eq 'hold') {
+            if ($quanta <= 3) {
+                $seq .= '.';  # Tap: up to 30ms
+            } elsif ($quanta <= 10) {
+                $seq .= '-';  # Short: 30-100ms  
+            } elsif ($quanta <= 50) {
+                # Medium: 100-500ms, use multiple dashes
+                my $dashes = int($quanta / 10);
+                $seq .= '-' x $dashes;
+            } elsif ($quanta <= 100) {
+                # Long: 500ms-1s, use = signs
+                my $equals = int($quanta / 25);
+                $seq .= '=' x $equals;
+            } else {
+                # Very long: 1s+, show actual count
+                $seq .= sprintf("[%dms]", int($d->{duration} * 1000));
+            }
+        } else {  # pause
+            if ($quanta <= 5) {
+                $seq .= '~';  # Short pause: up to 50ms
+            } elsif ($quanta <= 20) {
+                # Medium pause: 50-200ms
+                my $tildes = int($quanta / 5);
+                $seq .= '~' x $tildes;
+            } elsif ($quanta <= 100) {
+                # Long pause: 200ms-1s
+                my $tildes = int($quanta / 20);
+                $seq .= '~' x min($tildes, 5);
+            } else {
+                # Very long pause: 1s+
+                $seq .= sprintf("{%dms}", int($d->{duration} * 1000));
+            }
+        }
+    }
+    
+    return $seq . ')';
+}
+
 
 sub finish_learning {
     # Disable mouse tracking
@@ -404,7 +499,7 @@ sub calculate_average_pattern {
 		}
 	}
 
-	my $seq = durations_to_sequence(\@avg_durations);
+	my $seq = durations_to_sequence_expansive(\@avg_durations);
     
     # Check for high variance
     my $high_var = 0;

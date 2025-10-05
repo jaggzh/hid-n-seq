@@ -12,6 +12,7 @@ use ButtonGesture::Recognizer;
 my $recognizer = ButtonGesture::Recognizer->new(
     verbose => 1,
     callback => \&handle_gesture,
+    gestures => 'rs-gestures.yaml',
 );
 
 # Enable raw input mode and mouse tracking
@@ -67,7 +68,7 @@ while (1) {
     
     # Periodic update for timeout checking
     my $now = time();
-    if ($now - $last_update > 0.05) {  # Update every 50ms
+    if ($now - $last_update > 0.01) {  # Update every 50ms
         $recognizer->periodic_update();
         $last_update = $now;
     }

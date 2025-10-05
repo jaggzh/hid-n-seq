@@ -208,7 +208,7 @@ sub update_candidates {
     
     if ($self->{verbose}) {
         print "User sequence: '$user_seq'\n";
-        print "Active candidates:\n";
+        print "Active candidates:\r";
         for my $c (@{$self->{candidates}}) {
             printf "  %s (pattern: %s) score: %.3f\n", 
                 $c->{name}, $c->{pattern}, $c->{score};

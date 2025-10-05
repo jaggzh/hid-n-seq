@@ -9,10 +9,6 @@ use YAML::XS qw(LoadFile);
 
 our $VERSION = '0.01';
 
-# Constants
-use constant QUANTUM_MS => 50;  # 50ms per quantum
-use constant QUANTUM_S  => 0.05;
-
 sub new {
     my ($class, %args) = @_;
     
@@ -30,11 +26,13 @@ sub new {
         verbose        => $args{verbose} || 0,
         callback       => $args{callback} || sub { print "Action: $_[0]\n" },
         max_wait       => 30,  # max quanta to wait (1.5s default)
+        quantum_ms     => $args{quantum_ms} || 10,  # Resolution of symbols
     };
     
     bless $self, $class;
     $self->load_config();
     $self->reset();
+    $self->{quantum_s} = $self->{quantum_ms}/1000;
     return $self;
 }
 
@@ -136,7 +134,7 @@ sub tick {
     
     # Update quantum clock
     my $elapsed = $now - $self->{last_tick};
-    my $quanta_passed = int($elapsed / QUANTUM_S);
+    my $quanta_passed = int($elapsed / $self->{quantum_s});
     
     if ($quanta_passed > 0) {
         $self->{quantum_clock} += $quanta_passed;

@@ -10,13 +10,15 @@ use POSIX qw(floor ceil);
 # Command line arguments
 my $name = '';
 my $desc = 'Auto-learned pattern';
-my $timeout = 4.0;  # seconds of idle before pattern ends
+my $timeout = 3.0;  # seconds of idle before pattern ends
 my $help = 0;
+my $quantum_s = 0.01;
 
 GetOptions(
     'name|n=s'    => \$name,
     'desc|d=s'    => \$desc,
     'timeout|t=f' => \$timeout,
+    'quantum_s|q=f' => \$quantum_s,
     'help|h'      => \$help,
 ) or die "Error in command line arguments\n";
 
@@ -24,20 +26,23 @@ if ($help) {
     print_usage();
     exit 0;
 }
+$name //= "gesture";
+$desc //= "Gesture description";
 
-# If no name provided, ask for it
-if (!$name) {
-    print "Enter a name for this pattern: ";
-    $name = <STDIN>;
-    chomp $name;
-    $name ||= 'pattern_' . time();
-}
+# # If no name provided, ask for it
+# if (!$name) {
+#     print "Enter a name for this pattern: ";
+#     $name = <STDIN>;
+#     chomp $name;
+#     $name ||= 'pattern_' . time();
+# }
 
 print "\n" . "=" x 60 . "\n";
 print "Pattern Learning Mode\n";
 print "=" x 60 . "\n";
 print "Pattern name: $name\n";
 print "Description: $desc\n";
+print "Quantum resolution: ${quantum_s} s = " . int($quantum_s * 1000) . " ms\n";
 print "Timeout: ${timeout}s of idle = end of pattern\n";
 print "\nInstructions:\n";
 print "1. Click to start recording a pattern\n";
@@ -61,7 +66,7 @@ $SIG{INT} = sub { finish_learning() };
 print "Waiting for first click to begin...\n";
 
 my $last_activity = 0;
-my $check_interval = 0.05;  # 50ms
+my $check_interval = 0.01;  # 50ms
 
 while (1) {
     my $c = ReadKey(-1);
@@ -206,7 +211,7 @@ sub durations_to_sequence {
     
     for my $d (@$durations) {
         if ($d->{type} eq 'hold') {
-            my $quanta = ceil($d->{duration} / 0.05);  # 50ms quanta
+            my $quanta = ceil($d->{duration} / $quantum_s);  # 50ms quanta
             if ($quanta <= 2) {
                 $seq .= '.';
             } elsif ($quanta <= 10) {
@@ -215,7 +220,7 @@ sub durations_to_sequence {
                 $seq .= '-----+';
             }
         } else {  # pause
-            my $quanta = ceil($d->{duration} / 0.05);
+            my $quanta = ceil($d->{duration} / $quantum_s);
             if ($quanta <= 4) {
                 $seq .= '~';
             } elsif ($quanta <= 12) {
@@ -361,8 +366,8 @@ sub calculate_average_pattern {
             };
             
             # Convert to sequence character and elasticity
-            my $quanta = ceil($avg / 0.05);
-            my $variance_quanta = ceil($stddev / 0.05) + 1;
+            my $quanta = ceil($avg / $quantum_s);
+            my $variance_quanta = ceil($stddev / $quantum_s) + 1;
             
             if ($type eq 'hold') {
                 if ($quanta <= 2) {

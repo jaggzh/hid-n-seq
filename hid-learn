@@ -8,9 +8,9 @@ use List::Util qw(sum min max);
 use POSIX qw(floor ceil);
 
 # Command line arguments
-my $name = '';
+my $name = "gesture";
 my $desc = 'Auto-learned pattern';
-my $timeout = 3.0;  # seconds of idle before pattern ends
+my $timeout = 2.0;  # seconds of idle before pattern ends
 my $help = 0;
 my $quantum_s = 0.01;
 
@@ -26,8 +26,6 @@ if ($help) {
     print_usage();
     exit 0;
 }
-$name //= "gesture";
-$desc //= "Gesture description";
 
 # # If no name provided, ask for it
 # if (!$name) {
@@ -381,16 +379,32 @@ sub calculate_average_pattern {
         }
     }
     
-    # Generate average sequence
-    my @avg_durations = ();
-    for my $stat (@{$stats{stats}}) {
-        push @avg_durations, {
-            type => $stat->{type},
-            duration => $stat->{avg},
-        };
-    }
-    
-    my $seq = durations_to_sequence(\@avg_durations);
+	# Generate average sequence from first pattern's structure
+	# but with averaged timings
+	my @avg_durations = ();
+	my $reference_pattern = $patterns->[0];  # Use first pattern as reference
+
+	for (my $i = 0; $i < @{$reference_pattern->{durations}}; $i++) {
+		my @values = ();
+		my $type = $reference_pattern->{durations}->[$i]->{type};
+		
+		# Collect this duration from all patterns
+		for my $p (@$patterns) {
+			if ($i < @{$p->{durations}}) {
+				push @values, $p->{durations}->[$i]->{duration};
+			}
+		}
+		
+		if (@values) {
+			my $avg = sum(@values) / @values;
+			push @avg_durations, {
+				type => $type,
+				duration => $avg,
+			};
+		}
+	}
+
+	my $seq = durations_to_sequence(\@avg_durations);
     
     # Check for high variance
     my $high_var = 0;

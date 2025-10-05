@@ -1,0 +1,60 @@
+# Gesture Configuration File
+# Times are in quanta (1 quantum = 50ms)
+
+max_wait: 30  # Maximum quanta to wait before triggering (1.5s)
+
+patterns:
+  - name: tap
+    pattern: ".~)"
+    weight: 1.0
+    elasticity:
+      ".": 2
+      "~": 10
+    description: "Quick single tap"
+
+  - name: double_tap
+    pattern: ".~.~)"
+    weight: 1.5
+    elasticity:
+      ".": 2
+      "~": 8
+    description: "Two quick taps"
+
+  - name: long_press
+    pattern: "------)"
+    weight: 0.8
+    elasticity:
+      "-": 5
+    description: "Hold for ~300ms"
+
+  - name: triple_tap
+    pattern: ".~.~.~)"
+    weight: 1.8
+    elasticity:
+      ".": 2
+      "~": 6
+    description: "Three quick taps"
+
+  - name: press_tap
+    pattern: "----~.~)"
+    weight: 1.3
+    elasticity:
+      "-": 4
+      ".": 2
+      "~": 8
+    description: "Long press then tap"
+
+  - name: sos
+    pattern: "...~~~---~~~...~)"
+    weight: 2.0
+    elasticity:
+      ".": 1
+      "-": 2
+      "~": 4
+    description: "SOS morse pattern"
+
+# Pattern notation:
+# . = short press (1-2 quanta, 50-100ms)
+# - = medium press (per dash ~100ms)
+# ~ = pause between actions
+# ) = terminal marker (pattern complete)

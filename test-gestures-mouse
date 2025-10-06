@@ -83,11 +83,11 @@ sub main {
 	print "Mouse Gesture Recognizer Test\n";
 	print "=" x 60 . "\n";
 	print "Available gestures:\n";
-	print "  - Tap: Quick click\n";
-	print "  - Double Tap: Two quick clicks\n";
-	print "  - Long Press: Hold for ~500ms\n";
-	print "  - Triple Tap: Three quick clicks\n";
-	print "  - Press-Tap: Long press, release, then tap\n";
+	print "  - click: Quick click\n";
+	print "  - doubleclick: Two quick clicks\n";
+	print "  - longpress: Hold for a second\n";
+	print "  - 'menu': click .. click-click (intended for a menu but it's just a name).\n";
+	print "  - (not in my-gestures.yaml): Press-Tap: Long press, release, then tap\n";
 	print "\n";
 	print "Left-click anywhere to test gestures. Press Ctrl-C to quit.\n";
 	print "-" x 60 . "\n\n";

@@ -6,6 +6,8 @@ A timing-based gesture recognizer for **one physical button** (e.g., an accessib
 
 This document explains **why it exists**, **how it works** (conceptually and mathematically), and **where** to change things in code. It’s optimized so another LLM or engineer can jump in cold and still make safe edits.
 
+*This is a general purpose Perl module to process **press** and **release** events.** In my case, it's being incorporated into a little server script that receives a WiFi mouse button's transmissions.*
+
 <div align="center">
   <em>Testing gestures (patterns) from my-gestures.yaml...</em><br>
   <img src="ss/ss-test.png" alt="Snapshot of test-gestures-mouse script."><br>

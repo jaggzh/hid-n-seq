@@ -6,18 +6,18 @@ A timing-based gesture recognizer for **one physical button** (e.g., an accessib
 
 This document explains **why it exists**, **how it works** (conceptually and mathematically), and **where** to change things in code. It’s optimized so another LLM or engineer can jump in cold and still make safe edits.
 
+# DIY Captions:
+<div align="center">
+  <em>Testing gestures (patterns) from my-gestures.yaml...</em><br>
+  <img src="ss/ss-test.png" alt="Snapshot of test-gestures-mouse script."><br>
+</div>
+
 ---
 
 ## To just try it out
 1. Clone the project
 1. and run `./test-gestures-mouse`
 1. Try *click*, *doubleclick*, *longpress*, and other(s) listed when you run it
-
-# DIY Captions:
-<div align="center">
-  <em>Testing gestures (patterns) from my-gestures.yaml...</em><br>
-  <img src="ss/ss-test.png" alt="Snapshot of test-gestures-mouse script."><br>
-</div>
 
 **Those are loaded from my-gestures.yaml**
 

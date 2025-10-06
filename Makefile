@@ -1,6 +1,6 @@
 vi:
 	vim \
-		Makefile
+		Makefile \
 		test-gestures-mouse \
 		lib/ButtonGesture/Recognizer.pm \
 		hid-learn \

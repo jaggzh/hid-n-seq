@@ -13,6 +13,12 @@ This document explains **why it exists**, **how it works** (conceptually and mat
 1. and run `./test-gestures-mouse`
 1. Try *click*, *doubleclick*, *longpress*, and other(s) listed when you run it
 
+# DIY Captions:
+<div align="center">
+  <em>Testing gestures (patterns) from my-gestures.yaml...</em><br>
+  <img src="ss/ss-test.png" alt="Snapshot of test-gestures-mouse script."><br>
+</div>
+
 **Those are loaded from my-gestures.yaml**
 
 ## You can hand-craft your gestures

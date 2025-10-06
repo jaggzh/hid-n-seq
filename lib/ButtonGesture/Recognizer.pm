@@ -15,6 +15,8 @@ our $VERSION = '0.21';
 # Stream edges via feed_event('press'|'release', t).
 # Quantize into '.' (press/hold) and '~' (pause) using quantum_ms.
 #
+# Definitions: UB=Upper Bound (
+#
 # Matching (dot/tilde only):
 #   • One global time-stretch s ∈ [stretch_min,stretch_max] for a candidate.
 #   • Per-symbol elasticity (quanta) forgives small deviations.
@@ -96,7 +98,7 @@ sub new {
         viz_show_colors    => (defined $a{viz_show_colors} ? !!$a{viz_show_colors} : 1),
         viz_abbrev_max     => (defined $a{viz_abbrev_max} ? 0 + $a{viz_abbrev_max} : 60),
         viz_pats_full      => exists $a{viz_pats_full} ? !!$a{viz_pats_full} : 1,
-        viz_user_bg_rgb    => $a{viz_user_bg_rgb} // [30,45,50],   # {ubg}  a24bg(30,45,50)
+        viz_user_bg_rgb    => $a{viz_user_bg_rgb} // [25,40,65],   # {ubg}  a24bg(30,45,50)
         viz_pat_bg_rgb     => $a{viz_pat_bg_rgb}  // [40,40,40],   # {pbg}  a24bg(40,40,40)
 
         # scoring emphasis — give presses more influence than pauses; prefer multi-press patterns
@@ -247,8 +249,8 @@ sub _evaluate_if_ready {
         my $p = $self->{patterns}[$idx];
 
         if (@$obs_runs < @{$p->{runs}}) {
-            my $ub = _prefix_upperbound(
-                $self, $obs_runs, $p,
+            my $ub = $self->_prefix_upperbound(
+                $obs_runs, $p,
                 $self->{stretch_min}, $self->{stretch_max}
             );
             $ub *= $p->{w_eff};
@@ -261,7 +263,7 @@ sub _evaluate_if_ready {
         }
 
         my ($score, $s, $perrun) = $self->_full_score(
-            $obs_runs, $obs_runs, $p, $virtual_sym,
+            $obs_runs, $p, $virtual_sym,
             $self->{stretch_min}, $self->{stretch_max}
         );
         next if $score <= 0;
@@ -289,8 +291,8 @@ sub _evaluate_if_ready {
     # DEBUG:verbose_dump — timestamps relative to first edge
     my $t0   = $self->{_first_event_t} // $t;
     my $dt   = $t - $t0;
-    _debug_dump_observation($self, $obs_runs, $dt) if $self->{verbose} >= 2 && $self->{viz_enable};
-    _debug_dump_candidates($self, $obs_runs, \@full, $best_upperbound, $dt) if $self->{verbose} >= 2;
+    $self->_debug_dump_observation($obs_runs, $dt) if $self->{verbose} >= 2 && $self->{viz_enable};
+    $self->_debug_dump_candidates($obs_runs, \@full, $best_upperbound, $dt) if $self->{verbose} >= 2;
 
     # DEBUG:verbose_compact — one-liner (throttled)
     if ($self->{verbose} >= 1) {
@@ -547,20 +549,6 @@ sub _score_from_err_den {
 # Pattern utilities
 # -------------------------------------------------------------------
 
-
-
-
-sub _score_from_err_den {
-    my ($err, $den) = @_;
-    $den = max(1, $den);
-    my $score = $den / ($den + $err);   # in (0,1], higher is better
-    return $score;
-}
-
-# -------------------------------------------------------------------
-# Pattern utilities
-# -------------------------------------------------------------------
-
 # Normalize pattern & extract flags.
 # Returns ($canonical_string, $terminal_flag, $continues_flag)
 sub _canonicalize_pattern {
@@ -605,6 +593,7 @@ sub _runs_prefix {
 sub _ansi_rgb   { return sprintf("\e[38;2;%d;%d;%dm", $_[0], $_[1], $_[2]); }
 sub _ansi_bg    { return sprintf("\e[48;2;%d;%d;%dm", $_[0], $_[1], $_[2]); } # a24bg(R,G,B)
 sub _ansi_reset { return "\e[0m"; }
+my $_ansi_reset="\e[0m";
 
 # pen==0 → near-white; higher pen → darker base color
 sub _fg_for_pen {
@@ -799,7 +788,7 @@ sub _debug_dump_candidates {
     # VIS: one-line user abbreviated line (usr="...") with user bg
     if ($self->{viz_enable}) {
         my $usr_abbrev = _viz_runs_abbrev($obs_runs, $self->{viz_scale}, $self->{viz_symbols}, $self->{_viz_user_bg}, $self->{viz_abbrev_max});
-        printf "                                              usr=\"%s\"\n", $usr_abbrev;
+        printf "                                                       $$self{_viz_user_bg}usr=\"%s\"$_ansi_reset\n", $usr_abbrev;
     }
 
     my $smin = $self->{stretch_min};
@@ -807,6 +796,7 @@ sub _debug_dump_candidates {
 
     # Show ALL patterns: FULL (scored), UB (upper bound), or X (impossible)
     for my $idx (0..$#{$self->{patterns}}) {
+        $DB::single=1;
         my $p = $self->{patterns}[$idx];
         my $name = $p->{name};
         my $status;
@@ -816,13 +806,13 @@ sub _debug_dump_candidates {
 
         if (@$obs_runs < @{$p->{runs}}) {
             $status = 'UB';
-            $val = _prefix_upperbound($self, $obs_runs, $p, $smin, $smax) * $p->{w_eff};
+            $val = $self->_prefix_upperbound($obs_runs, $p, $smin, $smax) * $p->{w_eff};
 
             if ($self->{viz_enable}) {
                 my ($perrun_pref, $k, $s) = _perrun_prefix_alignment($obs_runs, $p, $obs_runs->[-1]{sym}, $smin, $smax);
                 $pat_abbrev = $self->_viz_pattern_abbrev_perrun($perrun_pref, $p->{runs}, $s, $k);
                 if ($self->{viz_pats_full}) {
-                    my $pf = _viz_full_from_perrun($self, $perrun_pref, $p->{runs}, $s, $k);
+                    my $pf = $self->_viz_full_from_perrun($perrun_pref, $p->{runs}, $s, $k);
                     $viz = $pf;
                 }
             }
@@ -844,7 +834,7 @@ sub _debug_dump_candidates {
                     my ($perrun_pref, $k, $s) = _perrun_prefix_alignment($obs_runs, $p, $obs_runs->[-1]{sym}, $smin, $smax);
                     if ($k > 0) {
                         $pat_abbrev = $self->_viz_pattern_abbrev_perrun($perrun_pref, $p->{runs}, $s, $k);
-                        $viz = $self->{viz_pats_full} ? _viz_full_from_perrun($self, $perrun_pref, $p->{runs}, $s, $k) : '';
+                        $viz = $self->{viz_pats_full} ? $self->_viz_full_from_perrun($perrun_pref, $p->{runs}, $s, $k) : '';
                     } else {
                         $pat_abbrev = $self->_viz_pattern_abbrev($p->{runs});
                         $viz = $self->{viz_pats_full} ? $self->_viz_pattern_str($p->{runs}, 0) : '';

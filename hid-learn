@@ -382,8 +382,13 @@ sub finish_learning {
     print "-" x 60 . "\n";
     
     if ($avg_pattern->{high_variance}) {
-        print "⚠️  High timing variance detected in some segments.\n";
-        print "   Consider practicing for more consistent timing.\n";
+    	print <<~EOT;
+			⚠️  High timing variance detected in some segments.
+           If your other patterns are different enough this may not be a problem.
+           Otherwise, you might have to consider different patterns, or practice
+           to have more-consistent timing. I aimed to make this intelligent enough
+           that, hopefully, it'll "just work".
+           EOT
     }
     
     if (@patterns < 3) {
@@ -391,11 +396,18 @@ sub finish_learning {
     }
     
     if ($avg_pattern->{sequence} =~ /\+/) {
-        print "⚠️  Very long holds/pauses detected.\n";
-        print "   Consider shorter patterns to reduce fatigue.\n";
+    	print <<~EOT;
+			⚠️  Long holds/pauses detected.
+		   This can be fatiguing for some people. In such cases, solutions are to:
+		   1. Use those patterns for less-used events
+		   2. Use shorter sequences with unique distinguishable rhythms.
     }
     
-    print "\nYou can copy the configuration above into your gestures.yaml file.\n";
+    print <<~EOT;
+		You can copy the configuration above into your gestures.yaml file.
+		If you didn't give it a unique name, you'll have to.
+		(The description is not used for its functionality at present.)
+		EOT
     
     exit 0;
 }

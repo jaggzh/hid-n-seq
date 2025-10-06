@@ -6,124 +6,112 @@ use Time::HiRes qw(time usleep);
 use FindBin;
 use lib "$FindBin::Bin/lib";
 use ButtonGesture::Recognizer;
-use Getopt::Long;
+use Getopt::Long::Descriptive;
 use YAML::XS qw(LoadFile);
 
-my $file = "my-gestures.yaml";
-my $quantum_s = 0.02;
+my $def_file = "my-gestures.yaml";
+my $def_quantum_s = 0.02;
 my $verbose = 1;
-GetOptions(
-  'file|f=s'    => \$file,
-  'quantum|q=f' => \$quantum_s,
-  'verbose|v!'  => \$verbose,
-) or die "Usage: $0 [-f gestures.yaml] [-q QUANTUM_SECONDS] [-v]\n";
 
-my $gestures = [];
-if ($file) {
-  die "No such YAML: $file\n" unless -f $file;
-  my $raw = LoadFile($file);
-  $gestures = ref($raw) eq 'HASH' ? ($raw->{gestures} // []) : $raw;
-}
+sub main {
+	my $gestures = [];
 
-my $recognizer = ButtonGesture::Recognizer->new(
-    verbose    => $verbose,
-    quantum_s  => $quantum_s,
-    callback => \&handle_gesture,
-    gestures   => $gestures,
-	commit_threshold   => 0.85,   # still require a strong match
-	commit_margin      => 0.08,   # need a bigger lead over any continuation
-	wait_preference    => 0.60,   # prefer waiting if a longer pattern is plausible
-	decision_timeout_s => 0.60,   # max patience window once a full candidate exists
-);
+    my $usage_desc = "%c %o";
+    my ($opt, $usage) = describe_options(
+        $usage_desc,
+        [ 'gesture-file|f=s' => "Gesture file .yaml",
+            { 'default' => $def_file, } ],
+        [ 'quantum-s|q=f'    => "Smallest resolution of sensing durations (seconds, float ($def_quantum_s)",
+            { 'default' => $def_quantum_s, } ],
+        [ 'verbose|v+'  => "Increase verbosity each time -v is used",
+            { 'default' => 0, } ],
+        [],
+        [ 'help|h'      => "Show this help", { shortcircuit => 1 } ],
+    );
+    print($usage->text), exit if $opt->help;
+    $verbose = $opt->verbose;
 
-my $idle_tick_s = $quantum_s;
-my $last_feed   = time();
+	if ($opt->gesture_file) {
+	  die "No such YAML: " . $opt->gesture_file . "\n"
+		unless -f $opt->gesture_file;
+	  my $raw = LoadFile($opt->gesture_file);
+	  $gestures = ref($raw) eq 'HASH' ? ($raw->{gestures} // []) : $raw;
+	}
 
-# Enable raw input mode and mouse tracking
-ReadMode('cbreak');
-print "\e[?1000;1003;1006h";  # enable full mouse tracking
+	my $recognizer = ButtonGesture::Recognizer->new(
+		verbose    => $verbose,
+		quantum_s  => $opt->quantum_s,
+		callback   => \&handle_gesture,
+		gestures   => $gestures,
+		commit_threshold   => 0.80,   # still require a strong match
+		commit_margin      => 0.18,   # need a bigger lead over any continuation
+		decision_timeout_s => 0.32,   # max patience window once a full candidate exists
+		wait_preference    => 0.60,   # prefer waiting if a longer pattern is plausible
+		stretch_max        => 2.2,
+	);
 
-# Setup signal handler for clean exit
-$SIG{INT} = sub { cleanup() };
+	my $idle_tick_s = $opt->quantum_s;
+	my $last_feed   = time();
 
-# Clear screen and show instructions
-print "\e[2J\e[H";  # Clear screen and move to top
-print "=" x 60 . "\n";
-print "Mouse Gesture Recognizer Test\n";
-print "=" x 60 . "\n";
-print "Available gestures:\n";
-print "  - Tap: Quick click\n";
-print "  - Double Tap: Two quick clicks\n";
-print "  - Long Press: Hold for ~500ms\n";
-print "  - Triple Tap: Three quick clicks\n";
-print "  - Press-Tap: Long press, release, then tap\n";
-print "\n";
-print "Left-click anywhere to test gestures. Press Ctrl-C to quit.\n";
-print "-" x 60 . "\n\n";
+	# Enable raw input mode and mouse tracking
+	ReadMode('cbreak');
+	print "\e[?1000;1003;1006h";  # enable full mouse tracking
+	
+	# Setup signal handler for clean exit
+	$SIG{INT} = sub { cleanup() };
+	
+	# Clear screen and show instructions
+	print "\e[2J\e[H";  # Clear screen and move to top
+	print "=" x 60 . "\n";
+	print "Mouse Gesture Recognizer Test\n";
+	print "=" x 60 . "\n";
+	print "Available gestures:\n";
+	print "  - Tap: Quick click\n";
+	print "  - Double Tap: Two quick clicks\n";
+	print "  - Long Press: Hold for ~500ms\n";
+	print "  - Triple Tap: Three quick clicks\n";
+	print "  - Press-Tap: Long press, release, then tap\n";
+	print "\n";
+	print "Left-click anywhere to test gestures. Press Ctrl-C to quit.\n";
+	print "-" x 60 . "\n\n";
+	
+	my $last_update = time();
 
-my $last_update = time();
-
-# while (1) {
-#     my $c = ReadKey(-1);
-#     if (defined $c) {
-#     	if (&& $c eq "\e") {
-#             my $seq = $c;
-#             while (defined(my $next = ReadKey(-1))) {
-#                 $seq .= $next;
-#             last if $next =~ /[A-Za-z~]$/;
-#             }
-#             if ($seq =~ /\e\[<(\d+);(\d+);(\d+)([Mm])/) {
-#                 my ($btn, $x, $y, $state) = ($1, $2, $3, $4);
-#             if ($btn == 0) {
-#                 if ($state eq 'M') {
-#                     $recognizer->feed_event('press', time());
-#                     } else {
-#                     $recognizer->feed_event('release', time());
-#                 }
-#                 $last_feed = time();
-#             }
-#         }
-#     }
-    
-#     if (time() - $last_feed >= $idle_tick_s) {
-#         $recognizer->tick(time());
-#         $last_feed = time();
-#     }
-    
-#     usleep(1000);
-# }
-
-while (1) {
-    my $c = ReadKey(-1);
-    if (defined $c) {
-    	if ($c eq "\n") {
-    		say '';
-		} elsif ($c eq "\e") {
-            my $seq = $c;
-            while (defined(my $next = ReadKey(-1))) {
-                $seq .= $next;
-				last if $next =~ /[A-Za-z~]$/;
-            }
-            if ($seq =~ /\e\[<(\d+);(\d+);(\d+)([Mm])/) {
-                my ($btn, $x, $y, $state) = ($1, $2, $3, $4);
-				if ($btn == 0) {
-					if ($state eq 'M') {
-						$recognizer->feed_event('press', time());
-					} else {
-						$recognizer->feed_event('release', time());
+	while (1) {
+		my $c = ReadKey(-1);
+		if (defined $c) {
+			if ($c eq "q") {
+				say "QUIT\n";
+				last;
+			} elsif ($c eq "\n") {
+				say '';
+			} elsif ($c eq "\e") {
+				my $seq = $c;
+				while (defined(my $next = ReadKey(-1))) {
+					$seq .= $next;
+					last if $next =~ /[A-Za-z~]$/;
+				}
+				if ($seq =~ /\e\[<(\d+);(\d+);(\d+)([Mm])/) {
+					my ($btn, $x, $y, $state) = ($1, $2, $3, $4);
+					if ($btn == 0) {
+						if ($state eq 'M') {
+							$recognizer->feed_event('press', time());
+						} else {
+							$recognizer->feed_event('release', time());
+						}
+						$last_feed = time();
 					}
-					$last_feed = time();
 				}
 			}
-        }
-    }
-    
-    if (time() - $last_feed >= $idle_tick_s) {
-        $recognizer->tick(time());
-        $last_feed = time();
-    }
-    
-    usleep(1000);
+		}
+		
+		if (time() - $last_feed >= $idle_tick_s) {
+			$recognizer->tick(time());
+			$last_feed = time();
+		}
+		
+		usleep(1000);
+	}
 }
 
 sub handle_gesture {
@@ -138,3 +126,9 @@ sub cleanup {
     print "\nMouse tracking disabled. Exiting.\n";
     exit;
 }
+
+END {
+	cleanup()
+}
+
+main();

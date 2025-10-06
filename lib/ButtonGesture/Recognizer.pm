@@ -30,21 +30,92 @@ our $VERSION = '0.11';
 #       decision_timeout_s OR (min remaining time any plausible supersequence would
 #       still need) × (1 - wait_preference). After that, COMMIT the best full candidate.
 #
+#
 # YAML schema:
 #   gestures: [ { name, pattern, weight, elasticity:{'.', '~'} }, ... ]
 #   or a top-level array of the same entries.
 #   Optional trailing '>' in a pattern is a “often-a-prefix” hint (advisory only).
 #
-# Tunables:
-#   quantum_ms        : ms per quantum (default 20)
-#   idle_timeout_s    : idle gap to attempt evaluation (default 0.25)
-#   commit_threshold  : min score to allow commit (default 0.75)
-#   commit_margin     : margin vs best UB to commit immediately (default 0.10)
-#   wait_preference   : 0..1; larger prefers waiting (default 0.20)
-#   decision_timeout_s: absolute cap on waiting once a full candidate exists (0.20)
-#   stretch_min/max   : global scaling range (default 0.5 .. 2.0)
-#   verbose           : debug prints
-#   gestures|config_file|callback
+# Tunables (constructor args) — detailed behavior and practical ranges:
+#   quantum_ms        : Milliseconds per quantum used to convert time
+#                       spans into run lengths. Smaller values = finer
+#                       timing resolution but more noise; larger
+#                       values = coarser timing and “snappier”
+#                       matching but less nuance. Typical range: 15–25 ms.
+#                       Default: 20.
+#                       Implications: Elasticity values (in quanta) scale
+#                       inversely with this; halving quantum_ms roughly doubles
+#                       the number of quanta in a given real-world gap/press.
+#
+#   idle_timeout_s    : If no new edge has arrived for this many seconds,
+#                       the engine runs an evaluation pass from tick().
+#                       Lower => lower perceived latency but more frequent
+#                       “consider committing now?” checks.
+#                       For mouse gestures, 0.20–0.35 is reasonable.
+#                       Default: 0.25.
+#
+#   commit_threshold  : Minimum score a FULL candidate must reach to be
+#                       eligible to commit. Raise to avoid weak matches; lower
+#                       to make the system more eager. Range: 0.70–0.90.
+#                       Default: 0.75.  Note: score already includes pattern
+#                       weight, time-stretch, and elasticity penalties.
+#
+#   commit_margin     : The minimum lead (best_full_score −
+#                       best_upper_bound_of_any_longer_pattern) required to
+#                       commit immediately.
+#                       Larger margin => more “patience” when a plausible
+#                       continuation (e.g., double-click) exists.
+#                       Effective margin =
+#                          commit_margin × (1 + wait_preference).
+#                       Typical: 0.10–0.25. Default: 0.10.
+#
+#   wait_preference   : 0..1 scalar that inflates the effective commit_margin
+#                       to bias waiting when a longer pattern is plausible.
+#                       0.0 = neutral (no extra patience). 0.5 => 1.5× margin.
+#                       1.0 => 2× margin. Typical: 0.3–0.8. Default: 0.20.
+#                       Practical tip: To make double-clicks win more often
+#                       over singles, raise wait_preference (e.g., 0.6–0.8).
+#
+#   decision_timeout_s: Upper bound on how long to wait once a FULL
+#                       candidate exists but doesn’t yet beat continuations by
+#                       margin.  If the second click hasn’t arrived by this
+#                       window, we commit the best full candidate (keeps UX
+#                       responsive).  Typical: 0.25–0.35. Default: 0.20.
+#                       Increase slightly (e.g., 0.30–0.34) for double-click
+#                       friendliness.
+#
+#   stretch_min/max   : Global time-stretch limits (s) for aligning observed
+#                       vs reference run lengths. The engine finds a single
+#                       scale s ∈ [stretch_min, stretch_max] to best fit total
+#                       timing before applying per-symbol elasticity. Defaults:
+#                       0.5 .. 2.0. If users’ double-click gaps are longer than
+#                       learned, raise stretch_max (e.g., to 2.2). If very fast
+#                       users exist, lower stretch_min (e.g., 0.6).
+#
+#   verbose           : Enables debug prints. Output is throttled (≈0.2s) to
+#                       avoid flooding identical lines.
+#
+#   gestures          : Array of gesture maps passed directly (preferred).
+#                       Each: { name, pattern, weight, elasticity:{'.','~'} }.
+#
+#   config_file       : YAML file loaded when gestures aren’t provided. Accepts
+#                       top-level array or {gestures:[...]} / {patterns:[...]}.
+#
+#   callback          : sub { my ($name, $score, $meta) = @_; ... } called on
+#                       commit; $meta->{t_end} is the commit timestamp.
+#
+# Tuning recipes (common intents):
+#   • Favor double-click over single when ambiguous:
+#       wait_preference:    0.60–0.80
+#       commit_margin:      0.18–0.22     (effective margin scales with wait_preference)
+#       decision_timeout_s: 0.30–0.34
+#       stretch_max:        2.1–2.3       (if real gaps are longer than learned)
+#       YAML: weight(double_click)=1.2, weight(click)=0.9–0.95; elasticity '~' for double_click: 5–8 quanta at quantum_ms=20
+#   • Make single-click immediate/snappier:
+#       wait_preference:    0.0–0.2
+#       commit_margin:      0.08–0.12
+#       decision_timeout_s: 0.18–0.24
+#       YAML: weight(click)≥1.1; elasticity '~' for single small (e.g., 1–2) to avoid swallowing longer gaps.
 # -------------------------------------------------------------------
 
 sub new {

@@ -1,8 +1,34 @@
 # Single-Button Gesture Recognition System
 
+*by jaggz.h {who is at} gmail.com*
+
 A timing-based gesture recognizer for **one physical button** (e.g., an accessibility switch). It lets users trigger rich actions (click, double-click, menu, long-press, custom sequences) by **press/release timing patterns** rather than multiple buttons.
 
 This document explains **why it exists**, **how it works** (conceptually and mathematically), and **where** to change things in code. It’s optimized so another LLM or engineer can jump in cold and still make safe edits.
+
+---
+
+## To just try it out
+1. Clone the project
+1. and run `./test-gestures-mouse`
+1. Try *click*, *doubleclick*, *longpress*, and other(s) listed when you run it
+
+**Those are loaded from my-gestures.yaml**
+
+## You can hand-craft your gestures
+
+1. But it's easier to run the "gesture" collection program here, `./hid-learn`
+1. When you run it, it'll be collecting one pattern (like "click .. click").
+1. Repeat your pattern as many times as you want.
+1. Hit **CTRL-C** to finish
+
+It'll output the averaged out lines you can put right into `my-gestures.yaml` or your own file.
+
+If you use `my-gestures.yaml` as your filename it'll load automatically into `./test-gestures-mouse`
+for you to try it out.
+
+**Note:** For better visibility, `./test-gestures-mouse` shows the *clicks* and *pauses* with
+blocky characters.
 
 ---
 

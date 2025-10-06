@@ -210,10 +210,10 @@ sub durations_to_sequence_broken { # Doesn't record hold time
     for my $d (@$durations) {
         if ($d->{type} eq 'hold') {
             my $quanta = ceil($d->{duration} / $quantum_s);
-			$seq .= '.' x $quanta;
+            $seq .= '.' x $quanta;
         } else {  # pause
             my $quanta = ceil($d->{duration} / $quantum_s);
-			$seq .= '~' x $quanta;
+            $seq .= '~' x $quanta;
         }
     }
     
@@ -228,8 +228,8 @@ sub durations_to_sequence_expansive {
         my $quanta = ceil($d->{duration} / $quantum_s);
         
         if ($d->{type} eq 'hold') {
-        	$seq .= '.' x $quanta;
-        	next;
+            $seq .= '.' x $quanta;
+            next;
             if ($quanta <= 3) {
                 $seq .= '.';  # Tap: up to 30ms
             } elsif ($quanta <= 10) {
@@ -247,8 +247,8 @@ sub durations_to_sequence_expansive {
                 $seq .= sprintf("[%dms]", int($d->{duration} * 1000));
             }
         } else {  # pause
-        	$seq .= '~' x $quanta;
-        	next;
+            $seq .= '~' x $quanta;
+            next;
             if ($quanta <= 5) {
                 $seq .= '~';  # Short pause: up to 50ms
             } elsif ($quanta <= 20) {
@@ -382,13 +382,13 @@ sub finish_learning {
     print "-" x 60 . "\n";
     
     if ($avg_pattern->{high_variance}) {
-    	print <<~EOT;
-			⚠️  High timing variance detected in some segments.
-           If your other patterns are different enough this may not be a problem.
-           Otherwise, you might have to consider different patterns, or practice
-           to have more-consistent timing. I aimed to make this intelligent enough
-           that, hopefully, it'll "just work".
-           EOT
+        print <<~EOT;
+            ⚠️  High timing variance detected in some segments.
+            If your other patterns are different enough this may not be a problem.
+            Otherwise, you might have to consider different patterns, or practice
+            to have more-consistent timing. I aimed to make this intelligent enough
+            that, hopefully, it'll "just work".
+            EOT
     }
     
     if (@patterns < 3) {
@@ -396,18 +396,19 @@ sub finish_learning {
     }
     
     if ($avg_pattern->{sequence} =~ /\+/) {
-    	print <<~EOT;
-			⚠️  Long holds/pauses detected.
-		   This can be fatiguing for some people. In such cases, solutions are to:
-		   1. Use those patterns for less-used events
-		   2. Use shorter sequences with unique distinguishable rhythms.
+        print <<~EOT;
+            ⚠️  Long holds/pauses detected.
+            This can be fatiguing for some people. In such cases, solutions are to:
+            1. Use those patterns for less-used events
+            2. Use shorter sequences with unique distinguishable rhythms.
+            EOT
     }
     
     print <<~EOT;
-		You can copy the configuration above into your gestures.yaml file.
-		If you didn't give it a unique name, you'll have to.
-		(The description is not used for its functionality at present.)
-		EOT
+        You can copy the configuration above into your gestures.yaml file.
+        If you didn't give it a unique name, you'll have to.
+        (The description is not used for its functionality at present.)
+        EOT
     
     exit 0;
 }
@@ -459,44 +460,44 @@ sub calculate_average_pattern {
             };
             
             # Convert to sequence character and elasticity
-			my $avg_q  = ceil($avg / $quantum_s);
-			my $var_q  = ceil($stddev / $quantum_s) + 1;
+            my $avg_q  = ceil($avg / $quantum_s);
+            my $var_q  = ceil($stddev / $quantum_s) + 1;
 
-			if ($type eq 'press') {
-				$elasticity{'.'} = max($elasticity{'.'} // 0, $var_q);
-			} else {
-				$elasticity{'~'} = max($elasticity{'~'} // 0, $var_q);
-			}
+            if ($type eq 'press') {
+                $elasticity{'.'} = max($elasticity{'.'} // 0, $var_q);
+            } else {
+                $elasticity{'~'} = max($elasticity{'~'} // 0, $var_q);
+            }
 
         }
     }
     
-	# Generate average sequence from first pattern's structure
-	# but with averaged timings
-	my @avg_durations = ();
-	my $reference_pattern = $patterns->[0];  # Use first pattern as reference
+    # Generate average sequence from first pattern's structure
+    # but with averaged timings
+    my @avg_durations = ();
+    my $reference_pattern = $patterns->[0];  # Use first pattern as reference
 
-	for (my $i = 0; $i < @{$reference_pattern->{durations}}; $i++) {
-		my @values = ();
-		my $type = $reference_pattern->{durations}->[$i]->{type};
-		
-		# Collect this duration from all patterns
-		for my $p (@$patterns) {
-			if ($i < @{$p->{durations}}) {
-				push @values, $p->{durations}->[$i]->{duration};
-			}
-		}
-		
-		if (@values) {
-			my $avg = sum(@values) / @values;
-			push @avg_durations, {
-				type => $type,
-				duration => $avg,
-			};
-		}
-	}
+    for (my $i = 0; $i < @{$reference_pattern->{durations}}; $i++) {
+        my @values = ();
+        my $type = $reference_pattern->{durations}->[$i]->{type};
+        
+        # Collect this duration from all patterns
+        for my $p (@$patterns) {
+            if ($i < @{$p->{durations}}) {
+                push @values, $p->{durations}->[$i]->{duration};
+            }
+        }
+        
+        if (@values) {
+            my $avg = sum(@values) / @values;
+            push @avg_durations, {
+                type => $type,
+                duration => $avg,
+            };
+        }
+    }
 
-	my $seq = durations_to_sequence_expansive(\@avg_durations);
+    my $seq = durations_to_sequence_expansive(\@avg_durations);
     
     # Check for high variance
     my $high_var = 0;
@@ -539,3 +540,4 @@ The script will:
 
 USAGE
 }
+# vim: et ts=4 sts=4 sw=4

@@ -248,24 +248,15 @@ sub _evaluate_if_ready {
     return unless @$obs_runs;
 
     my @full = ();         # full matches we could commit now
-    my $best_upperbound = 0.0;
-    my $best_ub_idx     = -1;
-    my @ub_idx = ();       # postpone UB calc until we know best FULL
+    my $best_upperbound_w   = 0.0;  # weighted UB (for display)
+    my $best_upperbound_raw = 0.0;  # unweighted UB (for decision logic)
+    my $best_ub_idx         = -1;
+    my @ub_idx = ();                # candidates to consider for UB after we pick best FULL
 
     for my $idx (0..$#{$self->{patterns}}) {
         my $p = $self->{patterns}[$idx];
 
         if (@$obs_runs < @{$p->{runs}}) {
-            my $ub = $self->_prefix_upperbound(
-                $obs_runs, $p,
-                $self->{stretch_min}, $self->{stretch_max}
-            );
-            $ub *= $p->{w_eff};
-
-            if ($ub > $best_upperbound) {
-                $best_upperbound = $ub;
-                $best_ub_idx     = $idx;
-            }
             push @ub_idx, $idx;   # consider later, but only supersequences of the best FULL
             next;
         }
@@ -298,27 +289,33 @@ sub _evaluate_if_ready {
  
     # Now compute UB only among strict supersequences of the chosen best FULL
     my $best_runs = $self->{patterns}[$best->{idx}]{runs};
-    $best_upperbound = 0.0; $best_ub_idx = -1;
+    $best_upperbound_w = 0.0;
+    $best_upperbound_raw = 0.0;
+    $best_ub_idx = -1;
+
     for my $j (@ub_idx) {
         my $q = $self->{patterns}[$j];
         next unless _runs_prefix($best_runs, $q->{runs});   # only true supersequences of 'best'
-        my $ub = $self->_prefix_upperbound(
+        my $ub_raw = $self->_prefix_upperbound(
             $obs_runs, $q, $self->{stretch_min}, $self->{stretch_max}
         );
-        $ub *= ($q->{w_eff} // $q->{weight});
-        if ($ub > $best_upperbound) { $best_upperbound = $ub; $best_ub_idx = $j; }
+        my $ub_w   = $ub_raw * ($q->{w_eff} // $q->{weight});
+        if ($ub_w > $best_upperbound_w)   { $best_upperbound_w   = $ub_w; }
+        if ($ub_raw > $best_upperbound_raw){ $best_upperbound_raw = $ub_raw; $best_ub_idx = $j; }
+
     }
 
     # DEBUG:verbose_dump — timestamps relative to first edge
     my $t0   = $self->{_first_event_t} // $t;
     my $dt   = $t - $t0;
     $self->_debug_dump_observation($obs_runs, $dt) if $self->{verbose} >= 2 && $self->{viz_enable};
-    $self->_debug_dump_candidates($obs_runs, \@full, $best_upperbound, $dt) if $self->{verbose} >= 2;
+    $self->_debug_dump_candidates($obs_runs, \@full, $best_upperbound_w, $dt) if $self->{verbose} >= 2;
 
     # DEBUG:verbose_compact — one-liner (throttled)
     if ($self->{verbose} >= 1) {
-        my $line = sprintf("[t=+%.03fs] best full: %s score=%.3f, best UB=%.3f\n",
-                           $dt, $best->{name}, $best->{score}, $best_upperbound);
+        my $line = sprintf("[t=+%.03fs] best full: %s score=%.3f, best UBw=%.3f UB=%.3f\n",
+                           $dt, $best->{name}, $best->{score}, $best_upperbound_w, $best_upperbound_raw);
+
         my $emit = 1;
         if ($self->{_last_debug_line} && $self->{_last_debug_line} eq $line) {
             $emit = 0; # identical line; avoid spam
@@ -333,7 +330,8 @@ sub _evaluate_if_ready {
     my $eff_margin = $self->{commit_margin} * (1.0 + $self->{wait_preference});
 
     # Decision: commit immediately if full beats any continuation by margin
-    if ($best->{score} >= $threshold && ($best->{score} - $best_upperbound) >= $eff_margin) {
+    if ($best->{score} >= $threshold && ($best->{raw} - $best_upperbound_raw) >= $eff_margin) {
+
         $self->_commit($best->{name}, $best->{score}, $t);
         return;
     }
@@ -344,7 +342,9 @@ sub _evaluate_if_ready {
     my $dynamic_window = $remain_s_max * (1.0 + $self->{wait_preference});
     my $decision_cap   = min($self->{decision_timeout_s}, $dynamic_window);
 
-    if ($best->{score} >= $threshold && $idle_s >= $decision_cap && $best->{score} >= $best_upperbound) {
+    if ($best->{score} >= $threshold && $idle_s >= $decision_cap &&
+        ( $self->{ignore_ub_on_timeout} || $best->{raw} >= $best_upperbound_raw )) {
+
         $self->_commit($best->{name}, $best->{score}, $t);
         return;
     }
@@ -817,7 +817,6 @@ sub _debug_dump_candidates {
 
     # Show ALL patterns: FULL (scored), UB (upper bound), or X (impossible)
     for my $idx (0..$#{$self->{patterns}}) {
-        $DB::single=1;
         my $p = $self->{patterns}[$idx];
         my $name = $p->{name};
         my $status;

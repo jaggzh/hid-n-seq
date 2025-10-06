@@ -1,0 +1,27 @@
+  - name: click
+    pattern: ".........)"
+    weight: 1.0
+    description: "Primary event"
+    elasticity:
+      "~": 5
+
+  - name: doubleclick
+    pattern: "........~~~~~~~~~~.......)"
+    weight: 1.0
+    description: "Secondary Event"
+    elasticity:
+      "-": 3
+      "~": 3
+  - name: longpress
+    pattern: "...........................................................................)"
+    weight: 1.0
+    description: "Long hold"
+    elasticity:
+      "-": 11
+  - name: menu
+    pattern: "......~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~.....~~~~~~~~~~.....)"
+    weight: 1.0
+    description: "Click.. Click-click"
+    elasticity:
+      "-": 3
+      "~": 15

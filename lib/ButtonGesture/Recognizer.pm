@@ -85,7 +85,7 @@ sub new {
 
         # visualization
         viz_scale          => (defined $a{viz_scale} ? 0.0 + $a{viz_scale} : 1.0),
-        viz_symbols        => $a{viz_symbols} // { '.' => '.', '~' => '~' },  # can be UTF-8 e.g. • and ∿
+        viz_symbols        => $a{viz_symbols} // { '.' => '▉', '~' => '▂' },  # can be UTF-8 e.g. • and ∿
         viz_show_colors    => (defined $a{viz_show_colors} ? !!$a{viz_show_colors} : 1),
 
         # runtime state

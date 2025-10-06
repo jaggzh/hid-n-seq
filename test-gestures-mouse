@@ -48,6 +48,8 @@ sub main {
 		decision_timeout_s => 0.32,   # max patience window once a full candidate exists
 		wait_preference    => 0.60,   # prefer waiting if a longer pattern is plausible
 		stretch_max        => 2.2,
+
+        viz_pats_full      => 0,
 	);
 
 	my $idle_tick_s = $opt->quantum_s;

@@ -15,7 +15,10 @@ our $VERSION = '0.21';
 # Stream edges via feed_event('press'|'release', t).
 # Quantize into '.' (press/hold) and '~' (pause) using quantum_ms.
 #
-# Definitions: UB=Upper Bound (
+# Definitions: UB=Upper Bound (another candidate (ie. a super-sequence))
+#  has a theoretical maximum best fit, which forms part of the comparison
+#  against a shorter sequence that's been reached, to see if we stop and
+#  accept the shorter or try for a better super-sequence match.
 #
 # Matching (dot/tilde only):
 #   • One global time-stretch s ∈ [stretch_min,stretch_max] for a candidate.
@@ -90,6 +93,7 @@ sub new {
         decision_timeout_s => (defined $a{decision_timeout_s} ? 0.0 + $a{decision_timeout_s} : 0.30),
         stretch_min        => (defined $a{stretch_min} ? 0.0 + $a{stretch_min} : 0.5),
         stretch_max        => (defined $a{stretch_max} ? 0.0 + $a{stretch_max} : 2.0),
+        prefer_longer_margin => (defined $a{prefer_longer_margin} ? 0.0 + $a{prefer_longer_margin} : 0.12),
 
         # VIS: top-level toggles (independent from 'verbose')
         viz_enable         => exists $a{viz_enable} ? !!$a{viz_enable} : 1,
@@ -106,6 +110,8 @@ sub new {
         run_weight_tilde   => (defined $a{run_weight_tilde} ? 0.0 + $a{run_weight_tilde} : 1.0),
         press_bias         => (defined $a{press_bias}       ? 0.0 + $a{press_bias}       : 0.15), # prior for patterns with more '.' runs
         tie_epsilon        => (defined $a{tie_epsilon}      ? 0.0 + $a{tie_epsilon}      : 0.02), # treat scores within ε as a tie
+        ignore_ub_on_timeout => exists $a{ignore_ub_on_timeout} ? !!$a{ignore_ub_on_timeout} : 1,
+
 
         # runtime state
         _events            => [],     # [ ['press'|'release', t], ... ]
@@ -244,6 +250,7 @@ sub _evaluate_if_ready {
     my @full = ();         # full matches we could commit now
     my $best_upperbound = 0.0;
     my $best_ub_idx     = -1;
+    my @ub_idx = ();       # postpone UB calc until we know best FULL
 
     for my $idx (0..$#{$self->{patterns}}) {
         my $p = $self->{patterns}[$idx];
@@ -259,6 +266,7 @@ sub _evaluate_if_ready {
                 $best_upperbound = $ub;
                 $best_ub_idx     = $idx;
             }
+            push @ub_idx, $idx;   # consider later, but only supersequences of the best FULL
             next;
         }
 
@@ -267,26 +275,39 @@ sub _evaluate_if_ready {
             $self->{stretch_min}, $self->{stretch_max}
         );
         next if $score <= 0;
-        my $final = $score * $p->{w_eff};
-        push @full, { name => $p->{name}, score => $final, raw => $score, s => $s, idx => $idx,
-                      perrun => $perrun, press_count => $p->{n_press}, runs_count => scalar(@{$p->{runs}}) };
- 
+
+        my $final = $score * ($p->{w_eff} // $p->{weight});
+        push @full, { name => $p->{name}, score => $final, raw => $score, s => $s,
+                      idx => $idx, perrun => $perrun,
+                      runs_count => scalar(@{$p->{runs}}) };
     }
 
     return unless @full;
 
     @full = sort { $b->{score} <=> $a->{score} } @full;
     my $best = $full[0];
-    # tie-break within ε: prefer patterns with more press runs (more informative), then more total runs
-    my @close = grep { $best->{score} - $_->{score} <= $self->{tie_epsilon} } @full;
-    if (@close > 1) {
-        @close = sort {
-            $b->{press_count} <=> $a->{press_count} ||
-            $b->{runs_count}  <=> $a->{runs_count}
-        } @close;
-        $best = $close[0];
-    }
 
+    # Prefer a longer FULL match if it's close to best (promotion)
+    my $prom = $self->{prefer_longer_margin};
+    my @close_longers = grep { $_->{runs_count} > $best->{runs_count}
+                               && $_->{score} >= $best->{score} - $prom } @full;
+    if (@close_longers) {
+        @close_longers = sort { $b->{runs_count} <=> $a->{runs_count} || $b->{score} <=> $a->{score} } @close_longers;
+        $best = $close_longers[0];
+    }
+ 
+    # Now compute UB only among strict supersequences of the chosen best FULL
+    my $best_runs = $self->{patterns}[$best->{idx}]{runs};
+    $best_upperbound = 0.0; $best_ub_idx = -1;
+    for my $j (@ub_idx) {
+        my $q = $self->{patterns}[$j];
+        next unless _runs_prefix($best_runs, $q->{runs});   # only true supersequences of 'best'
+        my $ub = $self->_prefix_upperbound(
+            $obs_runs, $q, $self->{stretch_min}, $self->{stretch_max}
+        );
+        $ub *= ($q->{w_eff} // $q->{weight});
+        if ($ub > $best_upperbound) { $best_upperbound = $ub; $best_ub_idx = $j; }
+    }
 
     # DEBUG:verbose_dump — timestamps relative to first edge
     my $t0   = $self->{_first_event_t} // $t;
@@ -323,7 +344,7 @@ sub _evaluate_if_ready {
     my $dynamic_window = $remain_s_max * (1.0 + $self->{wait_preference});
     my $decision_cap   = min($self->{decision_timeout_s}, $dynamic_window);
 
-    if ($best->{score} >= $threshold && $idle_s >= $decision_cap) {
+    if ($best->{score} >= $threshold && $idle_s >= $decision_cap && $best->{score} >= $best_upperbound) {
         $self->_commit($best->{name}, $best->{score}, $t);
         return;
     }

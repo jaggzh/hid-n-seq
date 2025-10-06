@@ -51,6 +51,17 @@ sub main {
 		stretch_max        => 2.2,
 
         viz_pats_full      => 0,
+
+		prefer_longer_margin => 0.15,   # promotes .~.~ over .~ when close
+		commit_threshold     => 0.80,
+		commit_margin        => 0.18,
+		decision_timeout_s   => 0.34,
+
+		run_weight_dot   => 1.8,
+		run_weight_tilde => 1.0,
+		press_bias       => 0.35,
+		tie_epsilon      => 0.03,
+
 	);
 
 	my $idle_tick_s = $opt->quantum_s;

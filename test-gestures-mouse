@@ -30,10 +30,10 @@ my $recognizer = ButtonGesture::Recognizer->new(
     quantum_s  => $quantum_s,
     callback => \&handle_gesture,
     gestures   => $gestures,
-	commit_threshold   => 0.80,   # still require a strong match
-	commit_margin      => 0.18,   # need a bigger lead over any continuation
+	commit_threshold   => 0.85,   # still require a strong match
+	commit_margin      => 0.08,   # need a bigger lead over any continuation
 	wait_preference    => 0.60,   # prefer waiting if a longer pattern is plausible
-	decision_timeout_s => 0.50,   # max patience window once a full candidate exists
+	decision_timeout_s => 0.60,   # max patience window once a full candidate exists
 );
 
 my $idle_tick_s = $quantum_s;

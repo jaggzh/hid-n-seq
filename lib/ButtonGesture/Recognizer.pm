@@ -7,7 +7,7 @@ use Time::HiRes qw(time);
 use List::Util qw(min max);
 use YAML::XS qw(LoadFile);
 
-our $VERSION = '0.11';
+our $VERSION = '0.12';
 
 # -------------------------------------------------------------------
 # Overview
@@ -25,11 +25,13 @@ our $VERSION = '0.11';
 # Decision (click-click vs click-click-click):
 #   • Evaluate on releases and idle tick.
 #   • If a FULL candidate (obs covers all of its runs) beats the best *upper bound*
-#     of any longer supersequence by commit_margin, COMMIT immediately.
+#     of any longer supersequence by commit_margin (inflated by wait_preference),
+#     COMMIT immediately.
 #   • Otherwise, we wait—but only up to a finite decision window:
 #       decision_timeout_s OR (min remaining time any plausible supersequence would
-#       still need) × (1 - wait_preference). After that, COMMIT the best full candidate.
-#
+#       still need at stretch_max) × (1 + wait_preference). After that, COMMIT
+#       the best full candidate.  (NOTE: previous builds used stretch_min and
+#       (1 - wait_preference), which biased toward singles; fixed here.)
 #
 # YAML schema:
 #   gestures: [ { name, pattern, weight, elasticity:{'.', '~'} }, ... ]
@@ -37,85 +39,41 @@ our $VERSION = '0.11';
 #   Optional trailing '>' in a pattern is a “often-a-prefix” hint (advisory only).
 #
 # Tunables (constructor args) — detailed behavior and practical ranges:
-#   quantum_ms        : Milliseconds per quantum used to convert time
-#                       spans into run lengths. Smaller values = finer
-#                       timing resolution but more noise; larger
-#                       values = coarser timing and “snappier”
-#                       matching but less nuance. Typical range: 15–25 ms.
-#                       Default: 20.
-#                       Implications: Elasticity values (in quanta) scale
-#                       inversely with this; halving quantum_ms roughly doubles
+#   quantum_ms        : Milliseconds per quantum used to convert time spans into run lengths.
+#                       Smaller values = finer timing resolution but more noise; larger values = coarser timing and “snappier”
+#                       matching but less nuance. Typical range: 15–25 ms. Default: 20.
+#                       Implications: Elasticity values (in quanta) scale inversely with this; halving quantum_ms roughly doubles
 #                       the number of quanta in a given real-world gap/press.
 #
-#   idle_timeout_s    : If no new edge has arrived for this many seconds,
-#                       the engine runs an evaluation pass from tick().
-#                       Lower => lower perceived latency but more frequent
-#                       “consider committing now?” checks.
-#                       For mouse gestures, 0.20–0.35 is reasonable.
-#                       Default: 0.25.
+#   idle_timeout_s    : If no new edge has arrived for this many seconds, the engine runs an evaluation pass from tick().
+#                       Lower => lower perceived latency but more frequent “consider committing now?” checks. Default: 0.25.
 #
-#   commit_threshold  : Minimum score a FULL candidate must reach to be
-#                       eligible to commit. Raise to avoid weak matches; lower
-#                       to make the system more eager. Range: 0.70–0.90.
-#                       Default: 0.75.  Note: score already includes pattern
-#                       weight, time-stretch, and elasticity penalties.
+#   commit_threshold  : Minimum score a FULL candidate must reach to be eligible to commit.
+#                       Raise to avoid weak matches; lower to make the system more eager. Range: 0.70–0.90. Default: 0.75.
+#                       Note: score already includes pattern weight, time-stretch, and elasticity penalties.
 #
-#   commit_margin     : The minimum lead (best_full_score −
-#                       best_upper_bound_of_any_longer_pattern) required to
-#                       commit immediately.
-#                       Larger margin => more “patience” when a plausible
-#                       continuation (e.g., double-click) exists.
-#                       Effective margin =
-#                          commit_margin × (1 + wait_preference).
-#                       Typical: 0.10–0.25. Default: 0.10.
+#   commit_margin     : The minimum lead (best_full_score − best_upper_bound_of_any_longer_pattern) required to commit immediately.
+#                       Larger margin => more “patience” when a plausible continuation (e.g., double-click) exists.
+#                       Effective margin = commit_margin × (1 + wait_preference). Typical: 0.10–0.25. Default: 0.10.
 #
-#   wait_preference   : 0..1 scalar that inflates the effective commit_margin
-#                       to bias waiting when a longer pattern is plausible.
-#                       0.0 = neutral (no extra patience). 0.5 => 1.5× margin.
-#                       1.0 => 2× margin. Typical: 0.3–0.8. Default: 0.20.
-#                       Practical tip: To make double-clicks win more often
-#                       over singles, raise wait_preference (e.g., 0.6–0.8).
+#   wait_preference   : 0..1 scalar that increases the effective commit_margin AND the dynamic wait window when a longer pattern is plausible.
+#                       0.0 = neutral (no extra patience). 0.5 => 1.5× margin/window. 1.0 => 2× margin/window. Default: 0.20.
 #
-#   decision_timeout_s: Upper bound on how long to wait once a FULL
-#                       candidate exists but doesn’t yet beat continuations by
-#                       margin.  If the second click hasn’t arrived by this
-#                       window, we commit the best full candidate (keeps UX
-#                       responsive).  Typical: 0.25–0.35. Default: 0.20.
-#                       Increase slightly (e.g., 0.30–0.34) for double-click
-#                       friendliness.
+#   decision_timeout_s: Upper bound on how long to wait once a FULL candidate exists but doesn’t yet beat continuations by margin.
+#                       If the second click hasn’t arrived by this window, we commit the best full candidate (keeps UX responsive).
+#                       Typical: 0.25–0.40. Default: 0.30 (slightly higher than before to be double-click friendly).
 #
-#   stretch_min/max   : Global time-stretch limits (s) for aligning observed
-#                       vs reference run lengths. The engine finds a single
-#                       scale s ∈ [stretch_min, stretch_max] to best fit total
-#                       timing before applying per-symbol elasticity. Defaults:
-#                       0.5 .. 2.0. If users’ double-click gaps are longer than
-#                       learned, raise stretch_max (e.g., to 2.2). If very fast
-#                       users exist, lower stretch_min (e.g., 0.6).
+#   stretch_min/max   : Global time-stretch limits (s) for aligning observed vs reference run lengths.
+#                       The engine finds a single scale s ∈ [stretch_min, stretch_max] to best fit total timing before applying
+#                       per-symbol elasticity. Defaults: 0.5 .. 2.0. If users’ double-click gaps are longer than learned, raise
+#                       stretch_max (e.g., to 2.2). If very fast users exist, lower stretch_min (e.g., 0.6).
 #
-#   verbose           : Enables debug prints. Output is throttled (≈0.2s) to
-#                       avoid flooding identical lines.
+#   verbose           : Integer. 0 = silent; 1 = compact (“best full vs UB”); 2 = candidate table + observed symbol string;
+#                       3 = deep per-run breakdown. Output is throttled (~0.2 s) to avoid flooding identical lines.
 #
-#   gestures          : Array of gesture maps passed directly (preferred).
-#                       Each: { name, pattern, weight, elasticity:{'.','~'} }.
-#
-#   config_file       : YAML file loaded when gestures aren’t provided. Accepts
-#                       top-level array or {gestures:[...]} / {patterns:[...]}.
-#
-#   callback          : sub { my ($name, $score, $meta) = @_; ... } called on
-#                       commit; $meta->{t_end} is the commit timestamp.
-#
-# Tuning recipes (common intents):
-#   • Favor double-click over single when ambiguous:
-#       wait_preference:    0.60–0.80
-#       commit_margin:      0.18–0.22     (effective margin scales with wait_preference)
-#       decision_timeout_s: 0.30–0.34
-#       stretch_max:        2.1–2.3       (if real gaps are longer than learned)
-#       YAML: weight(double_click)=1.2, weight(click)=0.9–0.95; elasticity '~' for double_click: 5–8 quanta at quantum_ms=20
-#   • Make single-click immediate/snappier:
-#       wait_preference:    0.0–0.2
-#       commit_margin:      0.08–0.12
-#       decision_timeout_s: 0.18–0.24
-#       YAML: weight(click)≥1.1; elasticity '~' for single small (e.g., 1–2) to avoid swallowing longer gaps.
+#   gestures          : Array of gesture maps passed directly (preferred). Each: { name, pattern, weight, elasticity:{'.','~'} }.
+#   config_file       : YAML file loaded when gestures aren’t provided. Accepts top-level array or {gestures:[...]} / {patterns:[...]}.
+#   callback          : sub { my ($name, $score, $meta) = @_; ... } called on commit; $meta->{t_end} is the commit timestamp.
 # -------------------------------------------------------------------
 
 sub new {
@@ -136,15 +94,15 @@ sub new {
         # scoring knobs
         commit_threshold   => (defined $a{commit_threshold} ? 0.0 + $a{commit_threshold} : 0.75),
         commit_margin      => (defined $a{commit_margin} ? 0.0 + $a{commit_margin} : 0.10),
-        wait_preference    => (defined $a{wait_preference} ? 0.0 + $a{wait_preference} : 0.20),
-        decision_timeout_s => (defined $a{decision_timeout_s} ? 0.0 + $a{decision_timeout_s} : 0.20),
+        wait_preference    => (defined $a{wait_preference} ? 0.0 + $a{wait_preference} : 0.60),
+        decision_timeout_s => (defined $a{decision_timeout_s} ? 0.0 + $a{decision_timeout_s} : 0.30),
         stretch_min        => (defined $a{stretch_min} ? 0.0 + $a{stretch_min} : 0.5),
         stretch_max        => (defined $a{stretch_max} ? 0.0 + $a{stretch_max} : 2.0),
 
         # runtime state
         _events            => [],     # [ ['press'|'release', t], ... ]
         _last_event_t      => undef,  # time of last edge
-        _last_debug        => undef,  # { name, score, ub, t } for throttling
+        _last_debug        => undef,  # { line, t } for throttling
 
         # compiled patterns
         patterns           => [],     # [{ name, weight, runs:[{sym,len}], len_total, elasticity{.,~}, continues }]
@@ -280,13 +238,13 @@ sub _evaluate_if_ready {
             next;
         }
 
-        my $score = _full_score(
+        my ($score, $s) = _full_score(
             $obs_runs, $p,
             $self->{stretch_min}, $self->{stretch_max}
         );
         next if $score <= 0;
-        $score *= $p->{weight};
-        push @full, { name => $p->{name}, score => $score, idx => $idx };
+        my $final = $score * $p->{weight};
+        push @full, { name => $p->{name}, score => $final, raw => $score, s => $s, idx => $idx };
     }
 
     return unless @full;
@@ -294,9 +252,13 @@ sub _evaluate_if_ready {
     @full = sort { $b->{score} <=> $a->{score} } @full;
     my $best = $full[0];
 
-    # Debug (throttled)
-    if ($self->{verbose}) {
-        my $now = $t;
+    # Verbose dumps
+    _debug_dump_observation($self, $obs_runs, $t) if $self->{verbose} && $self->{verbose} >= 2;
+    _debug_dump_candidates($self, $obs_runs, \@full, $best_upperbound) if $self->{verbose} && $self->{verbose} >= 2;
+
+    # Compact line (throttled)
+    if ($self->{verbose} && $self->{verbose} >= 1) {
+        my $now  = $t;
         my $line = sprintf("[recognizer] best full: %s score=%.3f, best UB=%.3f\n",
                            $best->{name}, $best->{score}, $best_upperbound);
         my $emit = 1;
@@ -311,18 +273,18 @@ sub _evaluate_if_ready {
     }
 
     my $threshold = $self->{commit_threshold};
-    my $margin    = $self->{commit_margin} * (1.0 + $self->{wait_preference});
+    my $eff_margin = $self->{commit_margin} * (1.0 + $self->{wait_preference});
 
     # Commit immediately if we clearly beat any continuation
-    if ($best->{score} >= $threshold && ($best->{score} - $best_upperbound) >= $margin) {
+    if ($best->{score} >= $threshold && ($best->{score} - $best_upperbound) >= $eff_margin) {
         $self->_commit($best->{name}, $best->{score}, $t);
         return;
     }
 
     # Otherwise, allow waiting—but only for a finite window.
     my $idle_s = defined($self->{_last_event_t}) ? ($t - $self->{_last_event_t}) : 0;
-    my $remain_s_min = $self->_min_remaining_time_for_any_supersequence($best->{idx});
-    my $dynamic_window = $remain_s_min * (1.0 - $self->{wait_preference});
+    my $remain_s_max = $self->_max_remaining_time_for_any_supersequence($best->{idx});  # use stretch_max for patience
+    my $dynamic_window = $remain_s_max * (1.0 + $self->{wait_preference});
     my $decision_cap   = max($self->{decision_timeout_s}, $dynamic_window);
 
     if ($best->{score} >= $threshold && $idle_s >= $decision_cap) {
@@ -339,26 +301,25 @@ sub _commit {
     $self->reset();
 }
 
-# Smallest additional time any longer pattern would still need, at stretch_min
-sub _min_remaining_time_for_any_supersequence {
+# Longest additional time any longer pattern would still need, using stretch_max (be patient)
+sub _max_remaining_time_for_any_supersequence {
     my ($self, $best_idx) = @_;
     return 0 unless $self->{_have_longers};
     my $best = $self->{patterns}[$best_idx];
     my $k    = @{$best->{runs}};
-    my $best_rem_q = undef;
+    my $worst_rem_q = 0;
 
     for my $j (0..$#{$self->{patterns}}) {
         next if $j == $best_idx;
         my $p = $self->{patterns}[$j];
         next unless _runs_prefix($best->{runs}, $p->{runs});
-        my $rem_q = 0;
-        for my $i ($k..$#{$p->{runs}}) { $rem_q += $p->{runs}[$i]{len} }
-        $best_rem_q = defined($best_rem_q) ? min($best_rem_q, $rem_q) : $rem_q;
+        my $rem_q = 0; $rem_q += $p->{runs}[$_] {len} for ($k..$#{$p->{runs}});
+        $worst_rem_q = max($worst_rem_q, $rem_q);
     }
 
-    return 0 unless defined $best_rem_q && $best_rem_q > 0;
-    my $rem_q_min = max(1, int($best_rem_q * $self->{stretch_min} + 0.5));
-    return $rem_q_min * $self->{quantum_s};
+    return 0 unless $worst_rem_q > 0;
+    my $rem_q_max = max(1, int($worst_rem_q * $self->{stretch_max} + 0.5));
+    return $rem_q_max * $self->{quantum_s};
 }
 
 # -------------------------------------------------------------------
@@ -387,21 +348,22 @@ sub _obs_runs_from_events {
     return \@runs;
 }
 
+# Score a fully-complete candidate: use first |p| runs from obs
 sub _full_score {
     my ($obs_runs, $p, $smin, $smax) = @_;
     my $k = @{$p->{runs}};
-    return 0 if @$obs_runs < $k;
+    return (0, 1.0) if @$obs_runs < $k;
 
     my @o = @$obs_runs[0..$k-1];
 
     # strict symbol agreement
     for my $i (0..$#o) {
-        return 0 if $o[$i]{sym} ne $p->{runs}[$i]{sym};
+        return (0, 1.0) if $o[$i]{sym} ne $p->{runs}[$i]{sym};
     }
 
     my $sum_o = 0; $sum_o += $_->{len} for @o;
     my $sum_r = 0; $sum_r += $_->{len} for @{$p->{runs}};
-    return 0 if $sum_r == 0;
+    return (0, 1.0) if $sum_r == 0;
 
     my $s = $sum_o / $sum_r;
     $s = ($s < $smin) ? $smin : ($s > $smax ? $smax : $s);
@@ -420,9 +382,12 @@ sub _full_score {
         $den += $rlen_scaled;
     }
 
-    return _score_from_err_den($err, $den);
+    my $score = _score_from_err_den($err, $den);
+    return ($score, $s);
 }
 
+# Optimistic upper bound for a longer pattern given current obs prefix
+# Assume future unmatched runs will be perfect; score the aligned prefix only.
 sub _prefix_upperbound {
     my ($obs_runs, $p, $smin, $smax) = @_;
     my $k = @$obs_runs;
@@ -434,9 +399,7 @@ sub _prefix_upperbound {
     return 0 if $err < 0;
 
     my $den_total = $den_cur;
-    for my $i ($k..$#{$p->{runs}}) {
-        $den_total += $p->{runs}[$i]{len};
-    }
+    for my $i ($k..$#{$p->{runs}}) { $den_total += $p->{runs}[$i]{len} }
 
     return _score_from_err_den($err, $den_total);
 }
@@ -515,6 +478,74 @@ sub _runs_prefix {
         return 0 if $A->[$i]{sym} ne $B->[$i]{sym};
     }
     return 1;
+}
+
+# -------------------------------------------------------------------
+# Debug helpers (verbose >= 2)
+# -------------------------------------------------------------------
+
+sub _runs_to_string {
+    my ($runs) = @_;
+    my $s = '';
+    for my $r (@$runs) {
+        my $ch = $r->{sym};
+        my $n  = $r->{len};
+        $n = 60 if $n > 60; # cap for readability
+        $s .= ($ch x $n);
+    }
+    return $s;
+}
+
+sub _debug_dump_observation {
+    my ($self, $obs_runs, $t) = @_;
+    my $qms = int($self->{quantum_s} * 1000 + 0.5);
+    my $sym = _runs_to_string($obs_runs);
+    my $len_q = 0; $len_q += $_->{len} for @$obs_runs;
+    my $len_ms = $len_q * $qms;
+    printf "[recognizer/v2] OBS q=%dms len=%dq (~%dms)  \"%s\"\n",
+        $qms, $len_q, $len_ms, $sym;
+    if ($self->{verbose} >= 3) {
+        my @parts = map { sprintf("%s×%d", $_->{sym}, $_->{len}) } @$obs_runs;
+        print "  runs: ", join(' ', @parts), "\n";
+    }
+}
+
+sub _debug_dump_candidates {
+    my ($self, $obs_runs, $full_list, $best_ub) = @_;
+
+    printf "[recognizer/v2] CAND full_best=%.3f ub_best=%.3f\n",
+        $full_list->[0]{score}, $best_ub;
+
+    if ($self->{verbose} >= 3) {
+        # Deep table: recompute statuses for all patterns
+        my $smin = $self->{stretch_min};
+        my $smax = $self->{stretch_max};
+        my @rows;
+        for my $idx (0..$#{$self->{patterns}}) {
+            my $p = $self->{patterns}[$idx];
+            my $status;
+            my $val;
+
+            if (@$obs_runs < @{$p->{runs}}) {
+                $status = 'UB';
+                $val = _prefix_upperbound($obs_runs, $p, $smin, $smax) * $p->{weight};
+            } else {
+                my ($sc, $s) = _full_score($obs_runs, $p, $smin, $smax);
+                if ($sc > 0) {
+                    $status = 'FULL';
+                    $val = $sc * $p->{weight};
+                } else {
+                    $status = 'X';
+                    $val = 0;
+                }
+            }
+
+            my $pat = _runs_to_string($p->{runs});
+            push @rows, sprintf("  %-12s  %-5s  score=%.3f  w=%.2f  pat=\"%s\"",
+                                $p->{name}, $status, $val, $p->{weight}, $pat);
+        }
+        print join("\n", @rows), "\n";
+    }
 }
 
 1;

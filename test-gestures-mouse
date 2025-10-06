@@ -13,6 +13,9 @@ use YAML::XS qw(LoadFile);
 my $def_file = "my-gestures.yaml";
 my $def_quantum_s = 0.02;
 my $verbose = 1;
+my $_ansi_matched = "\033[32;1m";
+my $_ansi_score = "\033[33;1m";
+my $_ansi_reset = "\033[0m";
 
 sub main {
 	my $gestures = [];
@@ -101,7 +104,8 @@ sub main {
 				say '';
 			} elsif ($c eq "\e") {
 				my $seq = $c;
-				while (defined(my $next = ReadKey(-1))) {
+				my $next;
+				while (defined($next = ReadKey(-1))) {
 					$seq .= $next;
 					last if $next =~ /[A-Za-z~]$/;
 				}
@@ -115,6 +119,8 @@ sub main {
 						}
 						$last_feed = time();
 					}
+				} else {
+					last if $next =~ /[A-Za-z~]$/;
 				}
 			}
 		}
@@ -130,7 +136,7 @@ sub main {
 
 sub handle_gesture {
     my ($gesture_name, $score, $meta) = @_;
-    print "\nMatched: $gesture_name  score=$score\n";
+    print "\nMatched: $_ansi_matched$gesture_name$_ansi_reset  score=$_ansi_score$score$_ansi_reset\n";
     print "at: $meta->{t_end}\n" if $meta && exists $meta->{t_end};
 }
 

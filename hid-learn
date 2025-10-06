@@ -209,23 +209,11 @@ sub durations_to_sequence_broken { # Doesn't record hold time
     
     for my $d (@$durations) {
         if ($d->{type} eq 'hold') {
-            my $quanta = ceil($d->{duration} / $quantum_s);  # 50ms quanta
-            if ($quanta <= 2) {
-                $seq .= '.';
-            } elsif ($quanta <= 10) {
-                $seq .= '-' x floor($quanta / 2);
-            } else {
-                $seq .= '-----+';
-            }
+            my $quanta = ceil($d->{duration} / $quantum_s);
+			$seq .= '.' x $quanta;
         } else {  # pause
             my $quanta = ceil($d->{duration} / $quantum_s);
-            if ($quanta <= 4) {
-                $seq .= '~';
-            } elsif ($quanta <= 12) {
-                $seq .= '~' x floor($quanta / 4);
-            } else {
-                $seq .= '~~~+';
-            }
+			$seq .= '~' x $quanta;
         }
     }
     
@@ -459,18 +447,15 @@ sub calculate_average_pattern {
             };
             
             # Convert to sequence character and elasticity
-            my $quanta = ceil($avg / $quantum_s);
-            my $variance_quanta = ceil($stddev / $quantum_s) + 1;
-            
-            if ($type eq 'hold') {
-                if ($quanta <= 2) {
-                    $elasticity{'.'} = max($elasticity{'.'} || 0, $variance_quanta);
-                } else {
-                    $elasticity{'-'} = max($elasticity{'-'} || 0, $variance_quanta);
-                }
-            } else {
-                $elasticity{'~'} = max($elasticity{'~'} || 0, $variance_quanta);
-            }
+			my $avg_q  = ceil($avg / $quantum_s);
+			my $var_q  = ceil($stddev / $quantum_s) + 1;
+
+			if ($type eq 'press') {
+				$elasticity{'.'} = max($elasticity{'.'} // 0, $var_q);
+			} else {
+				$elasticity{'~'} = max($elasticity{'~'} // 0, $var_q);
+			}
+
         }
     }
     

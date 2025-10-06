@@ -1,19 +1,39 @@
 #!/usr/bin/perl
-use strict;
-use warnings;
-use lib '.';  # Look for modules in current directory
+use v5.36;
+use lib '.';
 use Term::ReadKey;
 use Time::HiRes qw(time usleep);
 use FindBin;
 use lib "$FindBin::Bin/lib";
 use ButtonGesture::Recognizer;
+use Getopt::Long;
+use YAML::XS qw(LoadFile);
 
-# Create recognizer with verbose output
+my $file = "my-gestures.yaml";
+my $quantum_s = 0.02;
+my $verbose = 1;
+GetOptions(
+  'file|f=s'    => \$file,
+  'quantum|q=f' => \$quantum_s,
+  'verbose|v!'  => \$verbose,
+) or die "Usage: $0 [-f gestures.yaml] [-q QUANTUM_SECONDS] [-v]\n";
+
+my $gestures = [];
+if ($file) {
+  die "No such YAML: $file\n" unless -f $file;
+  my $raw = LoadFile($file);
+  $gestures = ref($raw) eq 'HASH' ? ($raw->{gestures} // []) : $raw;
+}
+
 my $recognizer = ButtonGesture::Recognizer->new(
-    verbose => 1,
+    verbose    => $verbose,
+    quantum_s  => $quantum_s,
     callback => \&handle_gesture,
-    gestures => 'rs-gestures.yaml',
+    gestures   => $gestures,
 );
+
+my $idle_tick_s = $quantum_s;
+my $last_feed   = time();
 
 # Enable raw input mode and mouse tracking
 ReadMode('cbreak');
@@ -39,69 +59,73 @@ print "-" x 60 . "\n\n";
 
 my $last_update = time();
 
-while (1) {
-    my $c = ReadKey(-1);  # Non-blocking read
+# while (1) {
+#     my $c = ReadKey(-1);
+#     if (defined $c) {
+#     	if (&& $c eq "\e") {
+#             my $seq = $c;
+#             while (defined(my $next = ReadKey(-1))) {
+#                 $seq .= $next;
+#             last if $next =~ /[A-Za-z~]$/;
+#             }
+#             if ($seq =~ /\e\[<(\d+);(\d+);(\d+)([Mm])/) {
+#                 my ($btn, $x, $y, $state) = ($1, $2, $3, $4);
+#             if ($btn == 0) {
+#                 if ($state eq 'M') {
+#                     $recognizer->feed_event('press', time());
+#                     } else {
+#                     $recognizer->feed_event('release', time());
+#                 }
+#                 $last_feed = time();
+#             }
+#         }
+#     }
     
+#     if (time() - $last_feed >= $idle_tick_s) {
+#         $recognizer->tick(time());
+#         $last_feed = time();
+#     }
+    
+#     usleep(1000);
+# }
+
+while (1) {
+    my $c = ReadKey(-1);
     if (defined $c) {
-        if ($c eq "\e") {                      # ESC sequence
+    	if ($c eq "\n") {
+    		say '';
+		} elsif ($c eq "\e") {
             my $seq = $c;
             while (defined(my $next = ReadKey(-1))) {
                 $seq .= $next;
-                last if $next =~ /[A-Za-z~]$/; # end of escape sequence
+				last if $next =~ /[A-Za-z~]$/;
             }
-            
-            # Match SGR mouse event: ESC [ < btn ; x ; y M or m
             if ($seq =~ /\e\[<(\d+);(\d+);(\d+)([Mm])/) {
                 my ($btn, $x, $y, $state) = ($1, $2, $3, $4);
-                my $pressed = ($state eq 'M');
-                
-                if ($btn == 0) { # Left button
-                    if ($pressed) {
-                        $recognizer->button_press();
-                    } else {
-                        $recognizer->button_release();
-                    }
-                }
-            }
+				if ($btn == 0) {
+					if ($state eq 'M') {
+						$recognizer->feed_event('press', time());
+					} else {
+						$recognizer->feed_event('release', time());
+					}
+					$last_feed = time();
+				}
+			}
         }
     }
     
-    # Periodic update for timeout checking
-    my $now = time();
-    if ($now - $last_update > 0.01) {  # Update every 50ms
-        $recognizer->periodic_update();
-        $last_update = $now;
+    if (time() - $last_feed >= $idle_tick_s) {
+        $recognizer->tick(time());
+        $last_feed = time();
     }
     
-    # Small sleep to prevent CPU spinning
-    usleep(1000);  # 1ms
+    usleep(1000);
 }
 
 sub handle_gesture {
-    my ($gesture_name, $details) = @_;
-    
-    my $timestamp = sprintf("%.2f", time());
-    print "\n";
-    print "!" x 40 . "\n";
-    print "GESTURE RECOGNIZED: $gesture_name\n";
-    print "Score: $details->{score}\n";
-    print "Time: $timestamp\n";
-    print "!" x 40 . "\n\n";
-    
-    # You could dispatch to actual functions here
-    if ($gesture_name eq 'tap') {
-        print ">> Executing primary action\n";
-    } elsif ($gesture_name eq 'double_tap') {
-        print ">> Opening menu\n";
-    } elsif ($gesture_name eq 'long_press') {
-        print ">> Activating secondary function\n";
-    } elsif ($gesture_name eq 'triple_tap') {
-        print ">> Emergency action\n";
-    } elsif ($gesture_name eq 'press_tap') {
-        print ">> Special combo detected\n";
-    }
-    
-    print "\n";
+    my ($gesture_name, $score, $meta) = @_;
+    print "\nMatched: $gesture_name  score=$score\n";
+    print "at: $meta->{t_end}\n" if $meta && exists $meta->{t_end};
 }
 
 sub cleanup {

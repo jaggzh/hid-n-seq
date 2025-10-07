@@ -49,7 +49,7 @@ sub main {
 		gestures   => $gestures,
 		commit_threshold   => 0.80,   # still require a strong match
 		commit_margin      => 0.18,   # need a bigger lead over any continuation
-		decision_timeout_s => 0.32,   # max patience window once a full candidate exists
+		decision_timeout_s => 0.34,   # max patience window once a full candidate exists
 		wait_preference    => 0.60,   # prefer waiting if a longer pattern is plausible
 		stretch_max        => 2.2,
 
@@ -58,7 +58,6 @@ sub main {
 		prefer_longer_margin => 0.15,   # promotes .~.~ over .~ when close
 		commit_threshold     => 0.80,
 		commit_margin        => 0.18,
-		decision_timeout_s   => 0.34,
 
 		run_weight_dot   => 1.8,
 		run_weight_tilde => 1.0,

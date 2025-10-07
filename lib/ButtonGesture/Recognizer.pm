@@ -256,8 +256,9 @@ sub _evaluate_if_ready {
     my $best_upperbound_raw = 0.0;  # unweighted UB (for decision logic)
     my $best_ub_idx         = -1;
     my @ub_idx = ();                # candidates to consider for UB after we pick best FULL
-	my ($last_kind, $last_t) = @{$self->{_events}[-1]};
+    my ($last_kind, $last_t) = @{$self->{_events}[-1]};
 
+    # Score all FULL-length candidates; collect strict-longer candidates for UB pass
     for my $idx (0..$#{$self->{patterns}}) {
         my $p = $self->{patterns}[$idx];
 
@@ -273,43 +274,53 @@ sub _evaluate_if_ready {
         next if $score <= 0;
 
         my $final = $score * ($p->{w_eff} // $p->{weight});
-        push @full, { name => $p->{name}, score => $final, raw => $score, s => $s,
-                      idx => $idx, perrun => $perrun,
-                      runs_count => scalar(@{$p->{runs}}),
-                      len_total  => $p->{len_total} };
+        push @full, {
+            name       => $p->{name},
+            score      => $final,
+            raw        => $score,
+            s          => $s,
+            idx        => $idx,
+            perrun     => $perrun,
+            runs_count => scalar(@{$p->{runs}}),
+            len_total  => $p->{len_total},
+        };
     }
 
     return unless @full;
 
+    # Rank by score first (higher is better in this normalized space)
     @full = sort { $b->{score} <=> $a->{score} } @full;
     my $best = $full[0];
 
-    # Prefer a longer FULL match if it's close to best (promotion)
+    # Prefer a longer FULL match only if it is a TRUE supersequence of the current best and close in score.
     my $prom = $self->{prefer_longer_margin};
-    my @close_longers = grep { $_->{runs_count} > $best->{runs_count}
-                               && $_->{score} >= $best->{score} - $prom } @full;
+    my $best_runs_ref = $self->{patterns}[$best->{idx}]{runs};
+    my @close_longers = grep {
+        $_->{runs_count} > $best->{runs_count}
+        && _runs_prefix($best_runs_ref, $self->{patterns}[$_->{idx}]{runs})
+        && $_->{score} >= $best->{score} - $prom
+    } @full;
     if (@close_longers) {
         @close_longers = sort { $b->{runs_count} <=> $a->{runs_count} || $b->{score} <=> $a->{score} } @close_longers;
         $best = $close_longers[0];
     }
 
-    # Tie-break within ε: prefer more '.' runs, then more total runs, then longer canonical length
+    # Tie-break within ε: prefer fewer runs, then shorter canonical length, then higher score
     my @near = grep { $best->{score} - $_->{score} <= $self->{tie_epsilon} } @full;
     if (@near > 1) {
         @near = sort {
-            $b->{runs_count}  <=> $a->{runs_count}  ||
-            $b->{len_total}   <=> $a->{len_total}   ||
+            $a->{runs_count}  <=> $b->{runs_count}  ||
+            $a->{len_total}   <=> $b->{len_total}   ||
             $b->{score}       <=> $a->{score}
         } @near;
         $best = $near[0];
     }
 
- 
-    # Now compute UB only among strict supersequences of the chosen best FULL
+    # Compute UB only among strict supersequences of the chosen best FULL
     my $best_runs = $self->{patterns}[$best->{idx}]{runs};
-    $best_upperbound_w = 0.0;
+    $best_upperbound_w   = 0.0;
     $best_upperbound_raw = 0.0;
-    $best_ub_idx = -1;
+    $best_ub_idx         = -1;
 
     for my $j (@ub_idx) {
         my $q = $self->{patterns}[$j];
@@ -317,23 +328,21 @@ sub _evaluate_if_ready {
         my $ub_raw = $self->_prefix_upperbound(
             $obs_runs, $q, $self->{stretch_min}, $self->{stretch_max}
         );
-        my $ub_w   = $ub_raw * ($q->{w_eff} // $q->{weight});
-        if ($ub_w > $best_upperbound_w)   { $best_upperbound_w   = $ub_w; }
-        if ($ub_raw > $best_upperbound_raw){ $best_upperbound_raw = $ub_raw; $best_ub_idx = $j; }
-
+        my $ub_w = $ub_raw * ($q->{w_eff} // $q->{weight});
+        if ($ub_w   > $best_upperbound_w)   { $best_upperbound_w   = $ub_w; }
+        if ($ub_raw > $best_upperbound_raw) { $best_upperbound_raw = $ub_raw; $best_ub_idx = $j; }
     }
 
-    # DEBUG:verbose_dump — timestamps relative to first edge
-    my $t0   = $self->{_first_event_t} // $t;
-    my $dt   = $t - $t0;
+    # DEBUG: verbose dumps — timestamps relative to first edge
+    my $t0 = $self->{_first_event_t} // $t;
+    my $dt = $t - $t0;
     $self->_debug_dump_observation($obs_runs, $dt) if $self->{verbose} >= 2 && $self->{viz_enable};
     $self->_debug_dump_candidates($obs_runs, \@full, $best_upperbound_w, $dt) if $self->{verbose} >= 2;
 
-    # DEBUG:verbose_compact — one-liner (throttled)
+    # DEBUG: compact one-liner (throttled)
     if ($self->{verbose} >= 1) {
         my $line = sprintf("[t=+%.03fs] best full: %s score=%.3f, best UBw=%.3f UB=%.3f\n",
                            $dt, $best->{name}, $best->{score}, $best_upperbound_w, $best_upperbound_raw);
-
         my $emit = 1;
         if ($self->{_last_debug_line} && $self->{_last_debug_line} eq $line) {
             $emit = 0; # identical line; avoid spam
@@ -344,41 +353,37 @@ sub _evaluate_if_ready {
         }
     }
 
-    my $threshold  = $self->{commit_threshold};
-    my $eff_margin = $self->{commit_margin} * (1.0 + $self->{wait_preference});
+    # Decision thresholds and guards
+    my $threshold     = $self->{commit_threshold};
+    my $eff_margin    = $self->{commit_margin} * (1.0 + $self->{wait_preference});
     my $best_last_sym = $self->{patterns}[$best->{idx}]{runs}[-1]{sym};
     my $dot_end_guard = ($self->{require_release_for_dot_end}
                          && defined $last_kind && $last_kind eq 'press'
                          && $best_last_sym eq '.');
-	my $idle_s = defined($self->{_last_event_t}) ? ($t - $self->{_last_event_t}) : 0;
-	my $remain_s_max = $self->_max_remaining_time_for_any_supersequence($best->{idx});
-# use stretch_max for patience
-	my $dynamic_window = $remain_s_max * (1.0 + $self->{wait_preference});
-	my $decision_cap = min($self->{decision_timeout_s}, $dynamic_window);
-	my $dot_end_guard = 0;
+    my $idle_s = defined($self->{_last_event_t}) ? ($t - $self->{_last_event_t}) : 0;
+    my $decision_cap = $self->{decision_timeout_s};
+    my $remain_s_max = $self->_max_remaining_time_for_any_supersequence($best->{idx});
+    if ($remain_s_max > 0) {
+        my $dynamic_window = $remain_s_max * (1.0 + $self->{wait_preference});
+        $decision_cap = min($decision_cap, $dynamic_window);
+        $decision_cap = $dynamic_window;  # respect UB: wait as long as a real supersequence might take
+    }
 
-	if (!$dot_end_guard && $best->{score} >= $threshold &&
-			$idle_s >= $decision_cap &&
-			( $self->{ignore_ub_on_timeout} || $best->{raw} >= $best_upperbound_raw )) {
-		$self->_commit($best->{name}, $best->{score}, $t);
-		return;
-	}
-    if (!$dot_end_guard && $best->{score} >= $threshold && $idle_s >= $decision_cap &&
-        	( $self->{ignore_ub_on_timeout} || $best->{raw} >= $best_upperbound_raw )) {
+    # Timed commit (respects ignore_ub_on_timeout)
+    if (!$dot_end_guard
+        && $best->{score} >= $threshold
+        && $idle_s >= $decision_cap
+        && ( $self->{ignore_ub_on_timeout} || $best->{raw} >= $best_upperbound_raw )) {
         $self->_commit($best->{name}, $best->{score}, $t);
         return;
     }
 
     # Hard-stop / reset if nothing matched and we've been idle too long or spanned too long
-	my $span_s = defined($self->{_first_event_t}) ? ($t - $self->{_first_event_t}) : 0;
-	if ($self->{hard_stop_idle_s} && $idle_s >= $self->{hard_stop_idle_s}) {
-		$self->_no_match($t);
-		return;
-	}
-	if ($self->{hard_stop_span_s} && $span_s >= $self->{hard_stop_span_s}) {
-		$self->_no_match($t);
-		return;
-	}
+    my $span_s = defined($self->{_first_event_t}) ? ($t - $self->{_first_event_t}) : 0;
+    if ($self->{hard_stop_idle_s} && $idle_s >= $self->{hard_stop_idle_s}) {
+        $self->_no_match($t);
+        return;
+    }
 }
 
 sub _commit {

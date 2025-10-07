@@ -135,6 +135,7 @@ sub main {
 
 sub handle_gesture {
     my ($gesture_name, $score, $meta) = @_;
+    $score //= 0;
     print "\nMatched: $_ansi_matched$gesture_name$_ansi_reset  score=$_ansi_score$score$_ansi_reset\n";
     print "at: $meta->{t_end}  ---  " if $meta && exists $meta->{t_end};
     print "(q) or Ctrl-C to quit\n";

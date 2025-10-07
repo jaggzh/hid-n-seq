@@ -6,538 +6,428 @@ use Time::HiRes qw(time);
 use Getopt::Long;
 use List::Util qw(sum min max);
 use POSIX qw(floor ceil);
+use Scalar::Util qw(looks_like_number);
 
-# Command line arguments
-my $name = "gesture";
-my $desc = 'Auto-learned pattern';
-my $timeout = 2.0;  # seconds of idle before pattern ends
-my $help = 0;
-my $quantum_s = 0.02;
+# -------------------------------------------------------------------
+# CLI
+# -------------------------------------------------------------------
+my $id            = '';                # short id: dblclick
+my $name          = 'gesture';         # human name
+my $desc          = 'Auto-learned pattern';
+my $timeout       = 2.0;               # idle seconds to end a single sample
+my $quantum_s     = 0.02;              # dot size in seconds for output (dot_ms = quantum_s*1000)
+my $dot_ms        = undef;             # alias; if provided, maps to quantum_s
+my $pat_dot_ms    = undef;             # optional override in YAML (pattern-level dot_ms)
+my $pat_weight    = 1.0;               # pattern weight in YAML
+my $run_weight    = 1.0;               # default per-run weight in YAML
+my $sym_press     = '.';               # glyph for press
+my $sym_release   = '~';               # glyph for release
+my $max_plain_seq = 1.0;               # seconds; runs longer than this will print .{N} / ~{N} in visual
+my $help          = 0;
 
 GetOptions(
-    'name|n=s'    => \$name,
-    'desc|d=s'    => \$desc,
-    'timeout|t=f' => \$timeout,
-    'quantum_s|q=f' => \$quantum_s,
-    'help|h'      => \$help,
+  'id=s'            => \$id,
+  'name|n=s'        => \$name,
+  'desc|d=s'        => \$desc,
+  'timeout|t=f'     => \$timeout,
+  'quantum_s|q=f'   => \$quantum_s,
+  'dot-ms=f'        => \$dot_ms,
+  'pat-dot-ms=f'    => \$pat_dot_ms,
+  'weight=f'        => \$pat_weight,
+  'run-weight=f'    => \$run_weight,
+  'sym-press=s'     => \$sym_press,
+  'sym-release=s'   => \$sym_release,
+  'max-plain-seq|x=f'=> \$max_plain_seq,
+  'help|h'          => \$help,
 ) or die "Error in command line arguments\n";
 
-if ($help) {
-    print_usage();
-    exit 0;
+if (defined $dot_ms) {
+  die "--dot-ms must be > 0\n" unless $dot_ms > 0;
+  $quantum_s = $dot_ms / 1000.0;
 }
+die "--quantum_s must be > 0\n" unless $quantum_s > 0;
+$dot_ms = 1000.0 * $quantum_s;
 
-# # If no name provided, ask for it
-# if (!$name) {
-#     print "Enter a name for this pattern: ";
-#     $name = <STDIN>;
-#     chomp $name;
-#     $name ||= 'pattern_' . time();
-# }
+if ($help) { print_usage(); exit 0; }
+$id ||= lc($name); $id =~ s/[^a-z0-9]+/_/g; $id =~ s/^_+|_+$//g;
 
-print "\n" . "=" x 60 . "\n";
+# -------------------------------------------------------------------
+# Explain
+# -------------------------------------------------------------------
+print "\n", "=" x 60, "\n";
 print "Pattern Learning Mode\n";
-print "=" x 60 . "\n";
-print "Pattern name: $name\n";
+print "=" x 60, "\n";
+print "Pattern id/name: $id / $name\n";
 print "Description: $desc\n";
-print "Quantum resolution: ${quantum_s} s = " . int($quantum_s * 1000) . " ms\n";
-print "Timeout: ${timeout}s of idle = end of pattern\n";
+printf "Quantum: %.0f ms per dot\n", $dot_ms;
+printf "Sample idle timeout: %.2fs\n", $timeout;
+printf "max-plain-seq: %.2fs  (runs longer print braces: .{N})\n", $max_plain_seq;
 print "\nInstructions:\n";
-print "1. Click to start recording a pattern\n";
-print "2. Perform your gesture\n";
-print "3. Wait ${timeout}s to end the pattern\n";
-print "4. Repeat to record multiple samples\n";
-print "5. Press Ctrl-C to finish and generate config\n";
-print "-" x 60 . "\n\n";
+print "  • Click to start recording a sample\n";
+print "  • Perform your gesture\n";
+printf "  • Wait %.2fs to end the sample\n", $timeout;
+print "  • Repeat to collect more samples\n";
+print "  • Finish with Ctrl-C, 'q', or Enter\n";
+print "-" x 60, "\n\n";
 
-# Pattern storage
-my @patterns = ();
-my $current_pattern = undef;
+# -------------------------------------------------------------------
+# State
+# -------------------------------------------------------------------
+my @samples;              # each: { runs => [ {type, dur_s}... ] }
 my $recording = 0;
+my $curr      = undef;    # { events=>[ {type,time_s_rel}... ], t0 => abs_time }
+my $last_activity = 0;
 
-# Enable mouse tracking
+# -------------------------------------------------------------------
+# Mouse on; raw mode
+# -------------------------------------------------------------------
 ReadMode('cbreak');
-print "\e[?1000;1003;1006h";
+print "\e[?1000;1003;1006h";  # XTerm: normal tracking, any-motion, SGR ext
 
 $SIG{INT} = sub { finish_learning() };
 
 print "Waiting for first click to begin...\n";
 
-my $last_activity = 0;
-my $check_interval = 0.01;  # 50ms
-
-while (1) {
-    my $c = ReadKey(-1);
-    
-    if (defined $c && $c eq "\e") {
-        my $seq = $c;
-        while (defined(my $next = ReadKey(-1))) {
-            $seq .= $next;
-            last if $next =~ /[A-Za-z~]$/;
-        }
-        
-        if ($seq =~ /\e\[<(\d+);(\d+);(\d+)([Mm])/) {
-            my ($btn, $x, $y, $state) = ($1, $2, $3, $4);
-            next unless $btn == 0;  # Left button only
-            
-            my $pressed = ($state eq 'M');
-            my $now = time();
-            
-            if (!$recording && $pressed) {
-                # Start new pattern recording
-                start_pattern();
-            }
-            
-            if ($recording) {
-                if ($pressed) {
-                    record_press($now);
-                } else {
-                    record_release($now);
-                }
-                $last_activity = $now;
-            }
-        }
+# -------------------------------------------------------------------
+# Main loop
+# -------------------------------------------------------------------
+my $poll = 0.01;  # seconds
+MAIN: while (1) {
+  my $c = ReadKey(-1);
+  if (defined $c) {
+    # finish on q or Enter
+    if ($c eq 'q' || $c eq 'Q' || $c eq "\n" || $c eq "\r") {
+      finish_learning();
     }
-    
-    # Check for timeout to end current pattern
-    if ($recording && $last_activity > 0) {
-        my $idle = time() - $last_activity;
-        if ($idle >= $timeout) {
-            end_pattern();
+    if ($c eq "\e") {
+      # read SGR mouse sequence
+      my $seq = $c;
+      while (defined(my $n = ReadKey(-1))) {
+        $seq .= $n;
+        last if $n =~ /[A-Za-z~]$/;
+      }
+      if ($seq =~ /\e\[<(\d+);(\d+);(\d+)([Mm])/) {
+        my ($btn, $x, $y, $state) = ($1, $2, $3, $4);
+        next unless $btn == 0;            # left only
+        my $pressed = ($state eq 'M');    # M=press, m=release
+        my $now = time();
+
+        if (!$recording && $pressed) {
+          start_sample();
         }
-    }
-    
-    select(undef, undef, undef, $check_interval);
-}
-
-sub start_pattern {
-    $recording = 1;
-    $current_pattern = {
-        events => [],
-        start_time => time(),
-        raw_sequence => '',
-    };
-    
-    my $count = scalar(@patterns) + 1;
-    print "\n[Recording pattern #$count...]\n";
-}
-
-sub record_press {
-    my $timestamp = shift;
-    
-    push @{$current_pattern->{events}}, {
-        type => 'press',
-        time => $timestamp - $current_pattern->{start_time},
-    };
-    
-    $current_pattern->{raw_sequence} .= 'P';
-    print "  PRESS at " . sprintf("%.3f", $timestamp - $current_pattern->{start_time}) . "s\n";
-}
-
-sub record_release {
-    my $timestamp = shift;
-    
-    push @{$current_pattern->{events}}, {
-        type => 'release',
-        time => $timestamp - $current_pattern->{start_time},
-    };
-    
-    $current_pattern->{raw_sequence} .= 'R';
-    print "  RELEASE at " . sprintf("%.3f", $timestamp - $current_pattern->{start_time}) . "s\n";
-}
-
-sub end_pattern {
-    return unless $recording;
-    
-    $recording = 0;
-    $last_activity = 0;
-    
-    # Validate pattern (must have matching press/release)
-    my $presses = grep { $_->{type} eq 'press' } @{$current_pattern->{events}};
-    my $releases = grep { $_->{type} eq 'release' } @{$current_pattern->{events}};
-    
-    if ($presses != $releases) {
-        print "  [Pattern rejected: unmatched press/release]\n";
-    } else {
-        # Convert to durations
-        analyze_pattern($current_pattern);
-        push @patterns, $current_pattern;
-        
-        my $count = scalar(@patterns);
-        print "  [Pattern #$count recorded successfully]\n";
-        print "  Sequence: $current_pattern->{analyzed_seq}\n";
-    }
-    
-    print "\nWaiting for next pattern (or Ctrl-C to finish)...\n";
-    $current_pattern = undef;
-}
-
-sub analyze_pattern {
-    my $pattern = shift;
-    my @events = @{$pattern->{events}};
-    
-    my @durations = ();
-    my $seq = '';
-    
-    for (my $i = 0; $i < @events; $i += 2) {
-        next unless $i + 1 < @events;
-        
-        my $press = $events[$i];
-        my $release = $events[$i + 1];
-        
-        next unless $press->{type} eq 'press' && $release->{type} eq 'release';
-        
-        # Hold duration
-        my $hold = $release->{time} - $press->{time};
-        push @durations, { type => 'hold', duration => $hold };
-        
-        # Pause duration (if not last)
-        if ($i + 2 < @events) {
-            my $next_press = $events[$i + 2];
-            my $pause = $next_press->{time} - $release->{time};
-            push @durations, { type => 'pause', duration => $pause };
+        if ($recording) {
+          if ($pressed) { record_edge('press',   $now); }
+          else          { record_edge('release', $now); }
+          $last_activity = $now;
         }
+      } else {
+        # unknown escape: ignore (we considered finishing-on-unknown; too risky)
+      }
     }
-    
-    $pattern->{durations} = \@durations;
-    $pattern->{analyzed_seq} = durations_to_sequence_expansive(\@durations);
+  }
+
+  # sample idle timeout → end sample
+  if ($recording && $last_activity > 0) {
+    my $idle = time() - $last_activity;
+    if ($idle >= $timeout) {
+      end_sample();
+    }
+  }
+
+  select(undef, undef, undef, $poll);
 }
 
-sub durations_to_sequence_broken { # Doesn't record hold time
-    my $durations = shift;
-    my $seq = '';
-    
-    for my $d (@$durations) {
-        if ($d->{type} eq 'hold') {
-            my $quanta = ceil($d->{duration} / $quantum_s);
-            $seq .= '.' x $quanta;
-        } else {  # pause
-            my $quanta = ceil($d->{duration} / $quantum_s);
-            $seq .= '~' x $quanta;
-        }
-    }
-    
-    return $seq . ')';
+# -------------------------------------------------------------------
+# Recording helpers
+# -------------------------------------------------------------------
+sub start_sample {
+  $recording = 1;
+  $curr = { events => [], t0 => time() };
+  my $n = scalar(@samples) + 1;
+  print "\n[Recording sample #$n...]\n";
 }
 
-sub durations_to_sequence_expansive {
-    my $durations = shift;
-    my $seq = '';
-    
-    for my $d (@$durations) {
-        my $quanta = ceil($d->{duration} / $quantum_s);
-        
-        if ($d->{type} eq 'hold') {
-            $seq .= '.' x $quanta;
-            next;
-            if ($quanta <= 3) {
-                $seq .= '.';  # Tap: up to 30ms
-            } elsif ($quanta <= 10) {
-                $seq .= '-';  # Short: 30-100ms  
-            } elsif ($quanta <= 50) {
-                # Medium: 100-500ms, use multiple dashes
-                my $dashes = int($quanta / 10);
-                $seq .= '-' x $dashes;
-            } elsif ($quanta <= 100) {
-                # Long: 500ms-1s, use = signs
-                my $equals = int($quanta / 25);
-                $seq .= '=' x $equals;
-            } else {
-                # Very long: 1s+, show actual count
-                $seq .= sprintf("[%dms]", int($d->{duration} * 1000));
-            }
-        } else {  # pause
-            $seq .= '~' x $quanta;
-            next;
-            if ($quanta <= 5) {
-                $seq .= '~';  # Short pause: up to 50ms
-            } elsif ($quanta <= 20) {
-                # Medium pause: 50-200ms
-                my $tildes = int($quanta / 5);
-                $seq .= '~' x $tildes;
-            } elsif ($quanta <= 100) {
-                # Long pause: 200ms-1s
-                my $tildes = int($quanta / 20);
-                $seq .= '~' x min($tildes, 5);
-            } else {
-                # Very long pause: 1s+
-                $seq .= sprintf("{%dms}", int($d->{duration} * 1000));
-            }
-        }
-    }
-    
-    return $seq . ')';
+sub record_edge {
+  my ($kind, $now) = @_;
+  my $t_rel = $now - $curr->{t0};
+  push @{$curr->{events}}, { type => $kind, time => $t_rel };
+  print sprintf("  %s at %.3fs\n", uc($kind), $t_rel);
 }
 
-sub durations_to_sequence_represent_bundled {
-    my $durations = shift;
-    my $seq = '';
-    
-    for my $d (@$durations) {
-        my $quanta = ceil($d->{duration} / $quantum_s);
-        
-        if ($d->{type} eq 'hold') {
-            if ($quanta <= 3) {
-                $seq .= '.';  # Tap: up to 30ms
-            } elsif ($quanta <= 10) {
-                $seq .= '-';  # Short: 30-100ms  
-            } elsif ($quanta <= 50) {
-                # Medium: 100-500ms, use multiple dashes
-                my $dashes = int($quanta / 10);
-                $seq .= '-' x $dashes;
-            } elsif ($quanta <= 100) {
-                # Long: 500ms-1s, use = signs
-                my $equals = int($quanta / 25);
-                $seq .= '=' x $equals;
-            } else {
-                # Very long: 1s+, show actual count
-                $seq .= sprintf("[%dms]", int($d->{duration} * 1000));
-            }
-        } else {  # pause
-            if ($quanta <= 5) {
-                $seq .= '~';  # Short pause: up to 50ms
-            } elsif ($quanta <= 20) {
-                # Medium pause: 50-200ms
-                my $tildes = int($quanta / 5);
-                $seq .= '~' x $tildes;
-            } elsif ($quanta <= 100) {
-                # Long pause: 200ms-1s
-                my $tildes = int($quanta / 20);
-                $seq .= '~' x min($tildes, 5);
-            } else {
-                # Very long pause: 1s+
-                $seq .= sprintf("{%dms}", int($d->{duration} * 1000));
-            }
-        }
+sub end_sample {
+  return unless $recording;
+  $recording = 0;
+  $last_activity = 0;
+
+  my $ev = $curr->{events};
+  my $presses  = scalar grep { $_->{type} eq 'press' } @$ev;
+  my $releases = scalar grep { $_->{type} eq 'release' } @$ev;
+
+  if ($presses != $releases || $presses == 0) {
+    print "  [Sample rejected: unmatched press/release]\n";
+  } else {
+    # Build runs (hold, then pause, alternating)
+    my @runs; # [{type=>'press'|'release', dur_s => ...}, ...]
+    for (my $i=0; $i<scalar(@$ev); $i+=2) {
+      next unless $i+1 < scalar(@$ev);
+      my $p = $ev->[$i];     # press
+      my $r = $ev->[$i+1];   # release
+      next unless $p->{type} eq 'press' && $r->{type} eq 'release';
+      my $hold  = $r->{time} - $p->{time};
+      push @runs, { type=>'press',   dur_s=>$hold };
+      if ($i+2 < scalar(@$ev)) {
+        my $np = $ev->[$i+2]; # next press
+        my $gap = $np->{time} - $r->{time};
+        push @runs, { type=>'release', dur_s=>$gap };
+      }
     }
-    
-    return $seq . ')';
+
+    my $seq = render_visual_ascii(\@runs);
+    push @samples, { runs=>\@runs, visual=>$seq };
+
+    my $n = scalar(@samples);
+    print "  [Sample #$n recorded]\n";
+    print "  Sequence: $seq\n";
+  }
+
+  print "\nWaiting for next sample (Ctrl-C / q / Enter to finish)...\n";
+  $curr = undef;
 }
 
-
+# -------------------------------------------------------------------
+# Finish / stats / YAML
+# -------------------------------------------------------------------
 sub finish_learning {
-    # Disable mouse tracking
-    print "\e[?1000;1003;1006l";
-    ReadMode('restore');
-    
-    print "\n\n" . "=" x 60 . "\n";
-    print "Learning Complete!\n";
-    print "=" x 60 . "\n\n";
-    
-    if (@patterns == 0) {
-        print "No valid patterns recorded.\n";
-        exit 1;
-    }
-    
-    print "Recorded " . scalar(@patterns) . " pattern(s)\n\n";
-    
-    # Show all recorded patterns
-    print "Individual patterns:\n";
-    for (my $i = 0; $i < @patterns; $i++) {
-        print "  #" . ($i + 1) . ": " . $patterns[$i]->{analyzed_seq} . "\n";
-        print "      Durations: ";
-        for my $d (@{$patterns[$i]->{durations}}) {
-            printf "%s:%.2fs ", $d->{type}, $d->{duration};
-        }
-        print "\n";
-    }
-    
-    # Calculate average pattern
-    my $avg_pattern = calculate_average_pattern(\@patterns);
-    
-    print "\n" . "-" x 60 . "\n";
-    print "Generated Configuration:\n";
-    print "-" x 60 . "\n\n";
-    
-    # Generate YAML config
-    print "  - name: $name\n";
-    print "    pattern: \"$avg_pattern->{sequence}\"\n";
-    print "    weight: 1.0\n";
-    print "    description: \"$desc\"\n";
-    
-    if ($avg_pattern->{elasticity}) {
-        print "    elasticity:\n";
-        for my $key (sort keys %{$avg_pattern->{elasticity}}) {
-            printf "      \"%s\": %d\n", $key, $avg_pattern->{elasticity}->{$key};
-        }
-    }
-    
-    print "\n" . "-" x 60 . "\n";
-    print "Pattern Statistics:\n";
-    print "-" x 60 . "\n";
-    
-    # Show statistics
-    if ($avg_pattern->{stats}) {
-        for my $stat (@{$avg_pattern->{stats}}) {
-            printf "  %s #%d: avg=%.2fs, stddev=%.2fs, range=[%.2f-%.2f]\n",
-                $stat->{type}, $stat->{index},
-                $stat->{avg}, $stat->{stddev},
-                $stat->{min}, $stat->{max};
-        }
-    }
-    
-    # Suggest improvements
-    print "\n" . "-" x 60 . "\n";
-    print "Suggestions:\n";
-    print "-" x 60 . "\n";
-    
-    if ($avg_pattern->{high_variance}) {
-        print <<~EOT;
-            ⚠️  High timing variance detected in some segments.
-            If your other patterns are different enough this may not be a problem.
-            Otherwise, you might have to consider different patterns, or practice
-            to have more-consistent timing. I aimed to make this intelligent enough
-            that, hopefully, it'll "just work".
-            EOT
-    }
-    
-    if (@patterns < 3) {
-        print "💡 Record more samples (3+) for better averaging.\n";
-    }
-    
-    if ($avg_pattern->{sequence} =~ /\+/) {
-        print <<~EOT;
-            ⚠️  Long holds/pauses detected.
-            This can be fatiguing for some people. In such cases, solutions are to:
-            1. Use those patterns for less-used events
-            2. Use shorter sequences with unique distinguishable rhythms.
-            EOT
-    }
-    
-    print <<~EOT;
-        You can copy the configuration above into your gestures.yaml file.
-        If you didn't give it a unique name, you'll have to.
-        (The description is not used for its functionality at present.)
-        EOT
-    
+  # mouse & tty restore
+  print "\e[?1000;1003;1006l";
+  ReadMode('restore');
+
+  print "\n\n", "=" x 60, "\n";
+  print "Learning Complete!\n";
+  print "=" x 60, "\n\n";
+
+  if (!@samples) {
+    print "No valid samples recorded.\n";
+    exit 1;
+  }
+
+  print "Recorded ", scalar(@samples), " sample(s)\n\n";
+  print "Individual samples:\n";
+  for my $i (0..$#samples) {
+    my $s = $samples[$i];
+    print "  #", ($i+1), ": ", $s->{visual}, "\n";
+  }
+
+  # Outlier removal by run-count
+  my $mode_runs = modal_run_count(\@samples);
+  my @kept = grep { scalar(@{$_->{runs}}) == $mode_runs } @samples;
+  printf "\nKept %d / %d samples with %d runs (dropped %d by run-count)\n",
+    scalar(@kept), scalar(@samples), $mode_runs, scalar(@samples)-scalar(@kept);
+
+  if (scalar(@kept) < 2) {
+    print "\nNot enough aligned samples after filtering; try recording more.\n";
+    emit_yaml(\@kept); # still emit based on what we have
     exit 0;
+  }
+
+  emit_yaml(\@kept);
+  print_suggestions(\@kept);
+
+  exit 0;
 }
 
-sub calculate_average_pattern {
-    my $patterns = shift;
-    
-    return $patterns->[0] if @$patterns == 1;
-    
-    # Group durations by position and type
-    my @duration_groups = ();
-    my $max_length = 0;
-    
-    for my $p (@$patterns) {
-        my $len = @{$p->{durations}};
-        $max_length = $len if $len > $max_length;
-    }
-    
-    my %stats = ();
-    my %elasticity = ();
-    
-    for (my $i = 0; $i < $max_length; $i++) {
-        my @values = ();
-        my $type = '';
-        
-        for my $p (@$patterns) {
-            if ($i < @{$p->{durations}}) {
-                push @values, $p->{durations}->[$i]->{duration};
-                $type = $p->{durations}->[$i]->{type};
-            }
-        }
-        
-        if (@values) {
-            my $avg = sum(@values) / @values;
-            my $min_val = min(@values);
-            my $max_val = max(@values);
-            
-            # Calculate standard deviation
-            my $variance = sum(map { ($_ - $avg) ** 2 } @values) / @values;
-            my $stddev = sqrt($variance);
-            
-            push @{$stats{stats}}, {
-                type => $type,
-                index => int($i / 2) + 1,
-                avg => $avg,
-                stddev => $stddev,
-                min => $min_val,
-                max => $max_val,
-            };
-            
-            # Convert to sequence character and elasticity
-            my $avg_q  = ceil($avg / $quantum_s);
-            my $var_q  = ceil($stddev / $quantum_s) + 1;
+# -------------------------------------------------------------------
+# Stats → YAML
+# -------------------------------------------------------------------
+sub emit_yaml {
+  my ($kept_ref) = @_;
 
-            if ($type eq 'press') {
-                $elasticity{'.'} = max($elasticity{'.'} // 0, $var_q);
-            } else {
-                $elasticity{'~'} = max($elasticity{'~'} // 0, $var_q);
-            }
-
-        }
+  # per-run arrays of durations (in seconds)
+  my $runN = scalar(@{$kept_ref->[0]{runs}});
+  my @by_run; for (1..$runN) { push @by_run, [] }
+  my @run_type; # press/release per index
+  for my $s (@$kept_ref) {
+    for my $i (0..$#{$s->{runs}}) {
+      my $r = $s->{runs}[$i];
+      $run_type[$i] //= $r->{type};
+      push @{$by_run[$i]}, $r->{dur_s};
     }
-    
-    # Generate average sequence from first pattern's structure
-    # but with averaged timings
-    my @avg_durations = ();
-    my $reference_pattern = $patterns->[0];  # Use first pattern as reference
+  }
 
-    for (my $i = 0; $i < @{$reference_pattern->{durations}}; $i++) {
-        my @values = ();
-        my $type = $reference_pattern->{durations}->[$i]->{type};
-        
-        # Collect this duration from all patterns
-        for my $p (@$patterns) {
-            if ($i < @{$p->{durations}}) {
-                push @values, $p->{durations}->[$i]->{duration};
-            }
-        }
-        
-        if (@values) {
-            my $avg = sum(@values) / @values;
-            push @avg_durations, {
-                type => $type,
-                duration => $avg,
-            };
-        }
-    }
+  # stats per run
+  my (@mean_s, @sd_s, @mean_dots, @sd_dots);
+  for my $i (0..$#by_run) {
+    my $list = $by_run[$i];
+    my $n = scalar(@$list);
+    my $mean = sum(@$list)/$n;
+    my $sd = stddev($list);
+    $mean_s[$i] = $mean;
+    $sd_s[$i]   = $sd;
+    $mean_dots[$i] = $mean / $quantum_s;
+    $sd_dots[$i]   = $sd   / $quantum_s;
+  }
 
-    my $seq = durations_to_sequence_expansive(\@avg_durations);
-    
-    # Check for high variance
-    my $high_var = 0;
-    for my $stat (@{$stats{stats}}) {
-        if ($stat->{stddev} > $stat->{avg} * 0.3) {  # >30% variance
-            $high_var = 1;
-            last;
-        }
+  # visuals
+  my $visual_ascii   = render_visual_ascii_from_means(\@mean_s, \@run_type);
+  my $visual_numeric = render_visual_numeric_dots(\@mean_dots, \@run_type);
+
+  # YAML v3
+  print "\n---\n";
+  print "version: 3\n";
+  printf "dot_ms: %.3f\n", $dot_ms;
+  print "\npatterns:\n";
+  print "  - id: $id\n";
+  print "    name: \"$name\"\n";
+  print "    visual: $visual_ascii\n";
+  print "    # visual_numeric: $visual_numeric\n";
+  if (defined $pat_dot_ms) { printf "    dot_ms: %.3f\n", $pat_dot_ms; }
+  printf "    weight: %.3f\n", $pat_weight;
+  print "    description: \"$desc\"\n";
+  print "    runs:\n";
+  for my $i (0..$#mean_dots) {
+    my $ty = $run_type[$i];
+    my $var = $sd_dots[$i];
+    my $n = scalar(@{$by_run[$i]});
+    printf "      %d: { type: %s, variance: %.3f, weight: %.3f, samples: %d }\n",
+      $i, $ty, $var, $run_weight, $n;
+  }
+
+  # symbols note
+  print "# sym_press=\"$sym_press\" sym_release=\"$sym_release\"\n";
+  print "# Edit per-run 'variance' (in dots) and 'weight' to tune tolerance/importance.\n";
+}
+
+# -------------------------------------------------------------------
+# Rendering helpers
+# -------------------------------------------------------------------
+sub render_visual_ascii {
+  my ($runs_ref) = @_;
+  my @syms = map { $_->{type} eq 'press' ? $sym_press : $sym_release } @$runs_ref;
+  my @dur_s = map { $_->{dur_s} } @$runs_ref;
+  return render_visual_ascii_from_means(\@dur_s, [ map { $_->{type} } @$runs_ref ]);
+}
+
+sub render_visual_ascii_from_means {
+  my ($mean_s_ref, $run_type_ref) = @_;
+  my $s = '';
+  for my $i (0..$#$mean_s_ref) {
+    my $ty = $run_type_ref->[$i] // 'press';
+    my $sym = ($ty eq 'press') ? $sym_press : $sym_release;
+    my $sec = $mean_s_ref->[$i];
+    if ($sec > $max_plain_seq) {
+      my $dots = $sec / $quantum_s;
+      $s .= sprintf("%s{%.1f}", $sym, $dots);     # braces; value is in dots
+    } else {
+      my $dots_i = int( ($sec / $quantum_s) + 0.5 );
+      $dots_i = 1 if $dots_i < 1;
+      $s .= ($sym x $dots_i);
     }
-    
-    return {
-        sequence => $seq,
-        elasticity => \%elasticity,
-        stats => $stats{stats},
-        high_variance => $high_var,
-    };
+  }
+  return $s;
+}
+
+sub render_visual_numeric_dots {
+  my ($mean_dots_ref, $run_type_ref) = @_;
+  my $s = '';
+  for my $i (0..$#$mean_dots_ref) {
+    my $ty  = $run_type_ref->[$i] // 'press';
+    my $sym = ($ty eq 'press') ? $sym_press : $sym_release;
+    $s .= sprintf("%s{%.1f}", $sym, $mean_dots_ref->[$i]);
+  }
+  return $s;
+}
+
+# -------------------------------------------------------------------
+# Utilities
+# -------------------------------------------------------------------
+sub stddev {
+  my ($arr) = @_;
+  my $n = scalar(@$arr);
+  return 0.0 if $n < 2;
+  my $mean = sum(@$arr)/$n;
+  my $ss = 0.0; $ss += ($_ - $mean)**2 for @$arr;
+  my $var = $ss / ($n - 1);
+  return sqrt($var);
+}
+
+sub modal_run_count {
+  my ($sref) = @_;
+  my %freq;
+  for my $s (@$sref) {
+    my $k = scalar(@{$s->{runs}});
+    $freq{$k}++;
+  }
+  my ($best_k, $best_v) = (0, -1);
+  while (my ($k,$v) = each %freq) { ($best_k,$best_v) = ($k,$v) if $v>$best_v; }
+  return $best_k;
+}
+
+sub print_suggestions {
+  my ($kept_ref) = @_;
+  # Recompute variances for messaging
+  my $runN = scalar(@{$kept_ref->[0]{runs}});
+  my @by_run; for (1..$runN) { push @by_run, [] }
+  for my $s (@$kept_ref) {
+    for my $i (0..$#{$s->{runs}}) { push @{$by_run[$i]}, $s->{runs}[$i]{dur_s}; }
+  }
+  my $any_high = 0;
+  for my $i (0..$#by_run) {
+    my $list = $by_run[$i];
+    next unless @$list >= 2;
+    my $avg = sum(@$list)/@$list;
+    my $sd  = stddev($list);
+    if ($sd > 0.30 * $avg) { $any_high = 1; last; }
+  }
+
+  print "\n", "-" x 60, "\n";
+  print "Suggestions:\n";
+  print "-" x 60, "\n";
+  if ($any_high) {
+    print <<"EOT";
+⚠️  High timing variance detected in some segments.
+   • If other patterns are clearly different, this may be fine.
+   • Otherwise consider choosing rhythms with more contrast,
+     or practicing a bit to increase consistency.
+EOT
+  }
+  if (scalar(@$kept_ref) < 3) {
+    print "💡 Record a few more samples (≥3) for better statistics.\n";
+  }
+  print <<"EOT";
+Tip: Extremely long holds/pauses can be fatiguing. If you see very large braces
+     forms like .{50.0}, either shorten the gesture or assign it to a less-used action.
+EOT
 }
 
 sub print_usage {
-    print <<'USAGE';
-hid-learn - Learn gesture patterns from user input
-
-Usage: hid-learn [OPTIONS]
+  print <<"USAGE";
+hid-learn - Learn gesture patterns from mouse input (XTerm), output gestures.yaml (version 3)
 
 Options:
-  -n, --name NAME       Name for the pattern (required)
-  -d, --desc DESC       Description of the pattern
-  -t, --timeout SECS    Idle timeout to end pattern (default: 4.0)
-  -h, --help           Show this help message
+  --id ID                 Short id (e.g., dblclick). Defaults to slugified --name.
+  -n, --name NAME         Human name (default: gesture)
+  -d, --desc DESC         Description for YAML (default: Auto-learned pattern)
+  -t, --timeout SECS      Idle timeout to end a sample (default: 2.0)
+  -q, --quantum_s SEC     Seconds per dot (default: 0.02)  [or use --dot-ms]
+      --dot-ms MS         Milliseconds per dot (e.g., 20.0) [overrides quantum_s]
+      --pat-dot-ms MS     Per-pattern override in YAML
+      --weight F          Pattern-level weight for YAML (default: 1.0)
+      --run-weight F      Default per-run weight for YAML (default: 1.0)
+      --sym-press CH      Symbol for press in visuals (default: .)
+      --sym-release CH    Symbol for release in visuals (default: ~)
+  -x, --max-plain-seq S   Max seconds printed as raw glyphs before braces .{N} (default: 1.0)
+  -h, --help              This help
 
-Examples:
-  hid-learn -n double_tap -d "Two quick taps"
-  hid-learn -n sos -d "Emergency signal" -t 5
+Controls:
+  • Record multiple samples by clicking.
+  • A sample ends after --timeout seconds of idle.
+  • Finish session with Ctrl-C, 'q', or Enter.
 
-The script will:
-1. Record multiple samples of your gesture
-2. Calculate average timing and variance
-3. Generate a configuration entry for gestures.yaml
-4. Show statistics and suggestions
-
+Output:
+  YAML (version: 3) with:
+    visual            - ASCII with '.' and '~'; long runs use .{N} / ~{N} (N in dots)
+    # visual_numeric  - Always brace-form for every run (N in dots)
+    dot_ms            - File-level ms per dot; optional per-pattern override
+    runs              - Per-run { type, variance (stddev in dots), weight, samples }
 USAGE
 }
-# vim: et ts=4 sts=4 sw=4

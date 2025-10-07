@@ -1,27 +1,43 @@
-  - name: click
-    pattern: ".........)"
-    weight: 1.0
-    description: "Primary event"
-    elasticity:
-      "~": 5
+---
+version: 3
+dot_ms: 20.000
 
-  - name: doubleclick
-    pattern: "........~~~~~~~~~~.......)"
-    weight: 1.0
-    description: "Secondary Event"
-    elasticity:
-      "-": 3
-      "~": 3
-  - name: longpress
-    pattern: "...........................................................................)"
-    weight: 1.0
-    description: "Long hold"
-    elasticity:
-      "-": 11
-  - name: menu
-    pattern: "......~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~.....~~~~~~~~~~.....)"
-    weight: 1.0
-    description: "Click.. Click-click"
-    elasticity:
-      "-": 3
-      "~": 15
+patterns:
+  - id: click
+    name: "Click"
+    visual: .......
+    # visual_numeric: .{7.1}
+    weight: 1.000
+    description: "Click"
+    runs:
+      0: { type: press, variance: 1.250, weight: 1.000, samples: 9 }
+  - id: doubleclick
+    name: "doubleclick"
+    visual: ......~~~~~~~~......
+    # visual_numeric: .{5.6}~{7.6}.{5.9}
+    weight: 1.000
+    description: "Double Click"
+    runs:
+      0: { type: press, variance: 1.397, weight: 1.000, samples: 9 }
+      1: { type: release, variance: 2.152, weight: 1.000, samples: 9 }
+      2: { type: press, variance: 1.215, weight: 1.000, samples: 9 }
+  - id: click-gap-doubleclick
+    name: "click-gap-doubleclick"
+    visual: .......~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~........~~~~~~~~~.......
+    # visual_numeric: .{7.3}~{37.6}.{7.6}~{8.9}.{6.8}
+    weight: 1.000
+    description: "Click gap Double-Click"
+    runs:
+      0: { type: press, variance: 0.995, weight: 1.000, samples: 12 }
+      1: { type: release, variance: 6.215, weight: 1.000, samples: 12 }
+      2: { type: press, variance: 4.688, weight: 1.000, samples: 12 }
+      3: { type: release, variance: 3.161, weight: 1.000, samples: 12 }
+      4: { type: press, variance: 0.700, weight: 1.000, samples: 12 }
+  - id: longpress
+    name: "longpress"
+    visual: ............................................
+    # visual_numeric: .{44.1}
+    weight: 1.000
+    description: "Longpress"
+    runs:
+      0: { type: press, variance: 8.190, weight: 1.000, samples: 11 }

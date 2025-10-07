@@ -54,6 +54,8 @@ our $VERSION = '0.21';
 #   commit_margin     : margin vs best UB to commit now (default 0.10).
 #   wait_preference   : 0..1; inflates effective margin & dynamic wait (default 0.60).
 #   decision_timeout_s: max patience once a FULL exists (default 0.30; use 0.30–0.40 for double-click).
+#   hard_stop_idle_s  : absolute idle wall-clock to emit NO_MATCH and reset (default 3.00).
+#   hard_stop_span_s  : max wall-clock from first edge to emit NO_MATCH (default 0=off).
 #   stretch_min/max   : global time-scale bounds (default 0.5..2.0).
 #   verbose           : 0 silent; 1 compact lines; 2 +tables+viz; 3 deep; timestamps always shown.
 #   gestures|config_file|callback
@@ -91,6 +93,8 @@ sub new {
         commit_margin      => (defined $a{commit_margin} ? 0.0 + $a{commit_margin} : 0.10),
         wait_preference    => (defined $a{wait_preference} ? 0.0 + $a{wait_preference} : 0.60),
         decision_timeout_s => (defined $a{decision_timeout_s} ? 0.0 + $a{decision_timeout_s} : 0.30),
+        hard_stop_idle_s   => (defined $a{hard_stop_idle_s} ? 0.0 + $a{hard_stop_idle_s} : 3.00),
+        hard_stop_span_s   => (defined $a{hard_stop_span_s} ? 0.0 + $a{hard_stop_span_s} : 0.00),
         stretch_min        => (defined $a{stretch_min} ? 0.0 + $a{stretch_min} : 0.5),
         stretch_max        => (defined $a{stretch_max} ? 0.0 + $a{stretch_max} : 2.0),
         prefer_longer_margin => (defined $a{prefer_longer_margin} ? 0.0 + $a{prefer_longer_margin} : 0.12),
@@ -346,25 +350,35 @@ sub _evaluate_if_ready {
     my $dot_end_guard = ($self->{require_release_for_dot_end}
                          && defined $last_kind && $last_kind eq 'press'
                          && $best_last_sym eq '.');
+	my $idle_s = defined($self->{_last_event_t}) ? ($t - $self->{_last_event_t}) : 0;
+	my $remain_s_max = $self->_max_remaining_time_for_any_supersequence($best->{idx});
+# use stretch_max for patience
+	my $dynamic_window = $remain_s_max * (1.0 + $self->{wait_preference});
+	my $decision_cap = min($self->{decision_timeout_s}, $dynamic_window);
+	my $dot_end_guard = 0;
 
-
-    # Decision: commit immediately if full beats any continuation by margin
-    if (!$dot_end_guard && $best->{score} >= $threshold && ($best->{raw} - $best_upperbound_raw) >= $eff_margin) {
-        $self->_commit($best->{name}, $best->{score}, $t);
-        return;
-    }
-
-    # Otherwise, wait but never beyond hard cap
-    my $idle_s = defined($self->{_last_event_t}) ? ($t - $self->{_last_event_t}) : 0;
-    my $remain_s_max = $self->_max_remaining_time_for_any_supersequence($best->{idx});  # use stretch_max for patience
-    my $dynamic_window = $remain_s_max * (1.0 + $self->{wait_preference});
-    my $decision_cap   = min($self->{decision_timeout_s}, $dynamic_window);
-
+	if (!$dot_end_guard && $best->{score} >= $threshold &&
+			$idle_s >= $decision_cap &&
+			( $self->{ignore_ub_on_timeout} || $best->{raw} >= $best_upperbound_raw )) {
+		$self->_commit($best->{name}, $best->{score}, $t);
+		return;
+	}
     if (!$dot_end_guard && $best->{score} >= $threshold && $idle_s >= $decision_cap &&
-        ( $self->{ignore_ub_on_timeout} || $best->{raw} >= $best_upperbound_raw )) {
+        	( $self->{ignore_ub_on_timeout} || $best->{raw} >= $best_upperbound_raw )) {
         $self->_commit($best->{name}, $best->{score}, $t);
         return;
     }
+
+    # Hard-stop / reset if nothing matched and we've been idle too long or spanned too long
+	my $span_s = defined($self->{_first_event_t}) ? ($t - $self->{_first_event_t}) : 0;
+	if ($self->{hard_stop_idle_s} && $idle_s >= $self->{hard_stop_idle_s}) {
+		$self->_no_match($t);
+		return;
+	}
+	if ($self->{hard_stop_span_s} && $span_s >= $self->{hard_stop_span_s}) {
+		$self->_no_match($t);
+		return;
+	}
 }
 
 sub _commit {
@@ -377,26 +391,38 @@ sub _commit {
     $self->reset();
 }
 
+sub _no_match {
+    my ($self, $t) = @_;
+    print sprintf("[t=+%.03fs] NO_MATCH (reset)\n",
+                  ($self->{_first_event_t} ? $t - $self->{_first_event_t} : 0.0)) if $self->{verbose};
+    $self->{callback}->('NO_MATCH', undef, { t_end => $t }) if $self->{callback};
+    $self->reset();
+}
+
 # Longest additional time any longer pattern would still need, using stretch_max (be patient)
 sub _max_remaining_time_for_any_supersequence {
     my ($self, $best_idx) = @_;
     return 0 unless $self->{_have_longers};
-    my $best = $self->{patterns}[$best_idx];
-    my $k    = @{$best->{runs}};
-    my $worst_rem_q = 0;
+    my $best_runs = $self->{patterns}[$best_idx]{runs};
+    my $best_len  = $self->{patterns}[$best_idx]{len_total} // 0;
 
-    for my $j (0..$#{$self->{patterns}}) {
+    my $q_s  = $self->{quantum_s} // 0.020;  # seconds per quantum (fallback 20ms)
+    my $smax = $self->{stretch_max} // 1.0;
+
+    my $remain_max_s = 0.0;
+    for my $j (0 .. $#{$self->{patterns}}) {
         next if $j == $best_idx;
-        my $p = $self->{patterns}[$j];
-        next unless _runs_prefix($best->{runs}, $p->{runs});
-        my $rem_q = 0; $rem_q += $p->{runs}[$_] {len} for ($k..$#{$p->{runs}});
-        $worst_rem_q = max($worst_rem_q, $rem_q);
+        my $q = $self->{patterns}[$j];
+        next unless _runs_prefix($best_runs, $q->{runs});         # only true supersequences
+        next unless @{$q->{runs}} > @{$best_runs};                # strictly longer
+        my $rem_len = ($q->{len_total} // 0) - $best_len;         # remaining quanta
+        next if $rem_len <= 0;
+        my $rem_s = $rem_len * $q_s * $smax;                      # worst-case time at max stretch
+        $remain_max_s = $rem_s if $rem_s <=> $remain_max_s;       # track max
     }
-
-    return 0 unless $worst_rem_q > 0;
-    my $rem_q_max = max(1, int($worst_rem_q * $self->{stretch_max} + 0.5));
-    return $rem_q_max * $self->{quantum_s};
+    return $remain_max_s;
 }
+
 
 # -------------------------------------------------------------------
 # Matching primitives

@@ -42,14 +42,16 @@ sub new {
         # symbol config
         sym_press           => defined $a{sym_press}           ? $a{sym_press}                 : '.',
         sym_release         => defined $a{sym_release}         ? $a{sym_release}               : '~',
-        # verbosity / viz
-        verbose             => defined $a{verbose}             ? 0 + $a{verbose}               : 1,
+        # visualization
         viz_enable          => exists $a{viz_enable}           ? !!$a{viz_enable}              : 1,
+        verbose             => defined $a{verbose}             ? 0 + $a{verbose}               : 1,
+        viz_symbols         => $a{viz_symbols} // { '.' => '▉', '~' => '▂' },
+        viz_colorize        => exists $a{viz_colorize} ? !!$a{viz_colorize} : 1,
         # defaults if pattern-run variance/weight missing
         default_var_press   => defined $a{default_var_press}   ? 0.0 + $a{default_var_press}   : 1.0, # dots
         default_var_release => defined $a{default_var_release} ? 0.0 + $a{default_var_release} : 2.0, # dots
         default_run_weight  => defined $a{default_run_weight}  ? 0.0 + $a{default_run_weight}  : 1.0,
-        # inputs
+        # inputs and runtime
         patterns            => $a{patterns} || [],
         callback            => $a{callback},
         # runtime
@@ -189,6 +191,8 @@ sub _evaluate_if_ready {
     for my $idx (0..$#{$self->{patterns}}) {
         my $p = $self->{patterns}[$idx];
         my $pruns = $p->{runs};
+        say "obs_runs = " . ($obs_runs // 'undef') ;
+        say "pruns = " . ($pruns // 'undef') ;
         if (@$obs_runs < @$pruns) { push @ub_idx, $idx; next; }
 
         my ($raw, $perrun) = _full_score_variance($obs_runs, $p);
@@ -358,6 +362,42 @@ sub _prefix_upperbound_variance {
     return ($w_sum>0 ? $acc/$w_sum : 0.0);
 }
 
+# NEW: UB with per-run similarities (for colored viz prefix)
+sub _prefix_ub_with_perrun {
+    my ($obs_runs, $q) = @_;
+    my $qruns = $q->{runs};
+    my $K = scalar(@$obs_runs);
+
+    my $w_sum = 0.0; my $acc = 0.0;
+    my @sim_prefix;
+
+    # prefix: score observed runs against q's runs
+    for my $i (0..$K-1) {
+        my $r  = $qruns->[$i] or last;
+        my $mu = 0.0 + ($r->{len}      // 1);
+        my $sd = 0.0 + ($r->{variance} // 1.0);
+        my $w  = 0.0 + ($r->{weight}   // 1.0);
+        my $x  = 0.0 + ($obs_runs->[$i]{len} // 0);
+        my $eps = 0.25;  # dots, stability floor
+        my $z  = ($sd > $eps) ? (($x - $mu)/$sd) : (($x - $mu)/$eps);
+        my $s  = exp(-0.5 * $z * $z);
+        $acc  += $w * $s;
+        $w_sum+= $w;
+        $sim_prefix[$i] = $s;  # for colorization
+    }
+
+    # suffix: assume perfect (optimistic UB)
+    for my $i ($K..$#$qruns) {
+        my $w = 0.0 + ($qruns->[$i]{weight} // 1.0);
+        $acc  += $w * 1.0;
+        $w_sum+= $w;
+    }
+
+    my $ub = ($w_sum>0 ? $acc/$w_sum : 0.0);
+    return ($ub, \@sim_prefix);
+}
+
+
 # -----------------------------------------------------------------------------
 # Observation utilities
 # -----------------------------------------------------------------------------
@@ -431,8 +471,12 @@ sub _no_match {
 sub _debug_dump_observation {
     my ($self, $obs_runs, $dt) = @_;
     my $q = $self->{quantum_ms};
+    my $symmap = $self->{viz_symbols} || {};
     my $s = '';
-    for my $r (@$obs_runs) { $s .= ($r->{sym} x max(1, $r->{len})); }
+    for my $r (@$obs_runs) {
+        my $glyph = $symmap->{$r->{sym}} // $r->{sym};
+        $s .= ($glyph x max(1, int($r->{len} + 0.5)));
+    }
     printf("[t=+%.03fs] OBS q=%dms len=%dq (~%dms)  \"%s\"\n",
            $dt, $q, scalar(@$obs_runs),
            int(sum(map { $_->{len} } @$obs_runs) * $self->{quantum_ms}), $s);
@@ -440,16 +484,81 @@ sub _debug_dump_observation {
 
 sub _debug_dump_candidates {
     my ($self, $obs_runs, $full_ref, $best_ub_w, $dt) = @_;
+    my $symmap = $self->{viz_symbols} || {};
+
+    # Render usr line with mapped symbols
     my $usr = '';
-    for my $r (@$obs_runs) { $usr .= ($r->{sym} x max(1, $r->{len})); }
+    for my $r (@$obs_runs) {
+        my $glyph = $symmap->{$r->{sym}} // $r->{sym};
+        $usr .= ($glyph x max(1, int($r->{len} + 0.5)));
+    }
     printf("%60s usr=\"%s\"\n", '', $usr);
+
+    # Build a complete candidate list: FULL rows we already have + UB-only rows
+    my %seen_full = map { $self->{patterns}[ $_->{idx} ]{name} // $_->{idx} => 1 } @$full_ref;
+
+    # First print FULL rows with per-run colorization based on $c->{perrun}
     for my $c (@$full_ref) {
         my $p = $self->{patterns}[$c->{idx}];
-        my $pat = '';
-        for my $r (@{$p->{runs}}) { $pat .= ($r->{sym} x max(1, $r->{len})); }
+        my $pat = _render_pattern_colored($self, $p, $obs_runs, 'FULL', $c->{perrun});
         printf("  %-14s FULL   score=%.3f  w=%.2f  pat=\"%s\"\n",
                $c->{name}, $c->{score}, ($p->{weight}//1.0), $pat);
     }
+
+    # Then print UB rows (strict supersequences of the best FULL prefix)
+    my @ub_only;
+    for my $j (0 .. $#{$self->{patterns}}) {
+        my $p = $self->{patterns}[$j];
+        my $name = $p->{name} // $p->{id} // "pattern_$j";
+        next if $seen_full{$name};
+        next unless @$obs_runs < @{$p->{runs}};
+        next unless _runs_prefix($obs_runs, $p->{runs});  # same sym prefix
+        my ($ub_raw, $sim_prefix) = _prefix_ub_with_perrun($obs_runs, $p);
+        my $ub_w = $ub_raw * ($p->{weight} // 1.0);
+        my $pat  = _render_pattern_colored($self, $p, $obs_runs, 'UB', $sim_prefix);
+        printf("  %-14s UB     score=%.3f  w=%.2f  pat=\"%s\"\n",
+               $name, $ub_w, ($p->{weight}//1.0), $pat);
+    }
+}
+
+# --- similarity color ramp (per run) -----------------------------------------
+sub _ansi_for_sim {
+    my ($s) = @_;  # s in [0,1]
+    return '' unless defined $s;
+    # Bright green → green → yellow → orange → red
+    return "\e[38;5;46m"  if $s >= 0.97;   # bright green
+    return "\e[32m"       if $s >= 0.90;   # green
+    return "\e[33m"       if $s >= 0.80;   # yellow
+    return "\e[38;5;208m" if $s >= 0.65;   # orange
+    return "\e[31m";                          # red
+}
+sub _ansi_dim   { "\e[2m" }
+sub _ansi_reset { "\e[0m" }
+
+# Render full pattern with per-run colorization; for UB, prefix colored, suffix dimmed
+sub _render_pattern_colored {
+    my ($self, $p, $obs_runs, $kind, $simlist) = @_;
+    my $symmap = $self->{viz_symbols} || {};
+    my $s = '';
+    my $K = scalar(@$obs_runs);
+    for my $i (0 .. $#{$p->{runs}}) {
+        my $r = $p->{runs}[$i];
+        my $glyph = $symmap->{$r->{sym}} // $r->{sym};
+        my $len   = max(1, int(($r->{len}//1) + 0.5));
+        my $seg   = ($glyph x $len);
+        if ($self->{viz_colorize}) {
+            if ($kind eq 'UB' && $i >= $K) {
+                $s .= _ansi_dim() . $seg . _ansi_reset();
+            } else {
+                my $sim = (defined $simlist && defined $simlist->[$i]) ? $simlist->[$i] : undef;
+                my $col = _ansi_for_sim($sim);
+                $s .= $col . $seg . _ansi_reset();
+            }
+        } else {
+            $s .= $seg;
+        }
+    }
+    return $s;
 }
 
 1;

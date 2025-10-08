@@ -41,7 +41,9 @@ sub new {
         hard_stop_span_s    => defined $a{hard_stop_span_s}    ? 0.0 + $a{hard_stop_span_s}    : 0.00,
         # UB patience tuning (global)
         patience            => defined $a{patience}            ? 0.0 + $a{patience}            : 1.00,
-        # symbol config
+        # DONE detection (NEW)
+        done_k_sigma        => defined $a{done_k_sigma}        ? 0.0 + $a{done_k_sigma}        : 1.00,
+        # symbols
         sym_press           => defined $a{sym_press}           ? $a{sym_press}                 : '.',
         sym_release         => defined $a{sym_release}         ? $a{sym_release}               : '~',
         # visualization
@@ -49,19 +51,18 @@ sub new {
         verbose             => defined $a{verbose}             ? 0 + $a{verbose}               : 1,
         viz_symbols         => $a{viz_symbols} // { '.' => '▉', '~' => '▂' },
         viz_show_colors     => exists $a{viz_show_colors} ? !!$a{viz_show_colors} : 1,
-        viz_scale           => defined $a{viz_scale} ? 0.0 + $a{viz_scale} : 1.0,       # chars per dot
-        viz_abbrev_max      => defined $a{viz_abbrev_max} ? 0 + $a{viz_abbrev_max} : 120,# max chars in pat=\"…\"
+        viz_scale           => defined $a{viz_scale} ? 0.0 + $a{viz_scale} : 1.0,
+        viz_abbrev_max      => defined $a{viz_abbrev_max} ? 0 + $a{viz_abbrev_max} : 120,
         viz_user_bg_rgb     => $a{viz_user_bg_rgb} // [ 18, 18, 18 ],
         viz_pat_bg_rgb      => $a{viz_pat_bg_rgb}  // [ 10, 10, 10 ],
         # defaults if pattern-run variance/weight missing
-        default_var_press   => defined $a{default_var_press}   ? 0.0 + $a{default_var_press}   : 1.0, # dots
-        default_var_release => defined $a{default_var_release} ? 0.0 + $a{default_var_release} : 2.0, # dots
+        default_var_press   => defined $a{default_var_press}   ? 0.0 + $a{default_var_press}   : 1.0,
+        default_var_release => defined $a{default_var_release} ? 0.0 + $a{default_var_release} : 2.0,
         default_run_weight  => defined $a{default_run_weight}  ? 0.0 + $a{default_run_weight}  : 1.0,
-        # inputs and runtime
+        # inputs/runtime
         patterns            => $a{patterns} || [],
         callback            => $a{callback},
-        # runtime
-        _events             => [],   # [ [press|release, t_abs], ... ]
+        _events             => [],
         _first_event_t      => undef,
         _last_event_t       => undef,
         _last_debug_line    => undef,
@@ -69,10 +70,14 @@ sub new {
 
     $self->{quantum_s} = $self->{quantum_ms} / 1000.0;
 
+    # VIS: precompute ANSI backgrounds
     $self->{_viz_user_bg} = _ansi_bg(@{$self->{viz_user_bg_rgb}});
     $self->{_viz_pat_bg}  = _ansi_bg(@{$self->{viz_pat_bg_rgb}});
-    # Precompute pattern structures (len per run in dots, total len/weight)
+
     _precompute_patterns($self);
+
+    # NEW: init per-pattern peak_done
+    for my $p (@{$self->{patterns}}) { $p->{_peak_done} = 0.0; }
 
     return $self;
 }
@@ -83,6 +88,8 @@ sub reset {
     $self->{_first_event_t} = undef;
     $self->{_last_event_t}  = undef;
     $self->{_last_debug_line} = undef;
+    # clear per-pattern peak_done each fresh observation
+    for my $p (@{$self->{patterns}}) { $p->{_peak_done} = 0.0; }
 }
 
 # -----------------------------------------------------------------------------
@@ -145,6 +152,30 @@ sub _precompute_patterns {
     }
 }
 
+# DONE detection — distinguishes PREFIX vs DONE for a pattern given current observation
+sub _pattern_is_done {
+    my ($self, $obs_runs, $p, $last_kind) = @_;
+    my $Lobs = scalar(@$obs_runs);
+    my $Lpat = scalar(@{$p->{runs}});
+    return 0 if $Lobs < $Lpat;
+
+    my $last_sym = $p->{runs}[-1]{sym};
+    if ($last_sym eq $self->{sym_press}) {
+        # dot-ended patterns are DONE only on release (press-end guard)
+        return 1 if ($self->{require_release_for_dot_end} && defined $last_kind && $last_kind eq 'release');
+        return 0;
+    } else {
+        # tilde-ended: DONE when the final gap reaches "completable" length (μ - k·σ), not growing forever
+        my $r_last = $p->{runs}[-1];
+        my $mu  = 0.0 + ($r_last->{len}      // 1);
+        my $sd  = 0.0 + ($r_last->{variance} // 1.0);
+        my $k   = 0.0 + ($self->{done_k_sigma} // 1.0);
+        my $need = $mu - $k * $sd;  $need = 0 if $need < 0;
+        my $x   = 0.0 + ($obs_runs->[$Lpat-1]{len} // 0);
+        return ($x >= $need) ? 1 : 0;
+    }
+}
+
 sub _runs_from_visual {
     my ($visual, $sp, $sr) = @_;
     my @runs; my $i = 0;
@@ -188,127 +219,142 @@ sub _evaluate_if_ready {
     );
     return unless @$obs_runs;
 
-    my @full = ();
-    my $best_upperbound_w   = 0.0;
-    my $best_upperbound_raw = 0.0;
-    my $best_ub_idx         = -1;
-    my @ub_idx = ();
+    my @full = ();                      # now "prefix-covered" candidates
+    my ($best_ub_w, $best_ub_raw, $best_ub_idx) = (0.0, 0.0, -1);
+    my @ub_idx = ();                    # indices to consider for UB
     my ($last_kind, $last_t) = @{$self->{_events}[-1]};
 
-    # Score FULL candidates; collect strict-longers for UB pass
     for my $idx (0..$#{$self->{patterns}}) {
         my $p = $self->{patterns}[$idx];
-        my $pruns = $p->{runs};
-        # say "obs_runs = " . ($obs_runs // 'undef') ;
-        # say "pruns = " . ($pruns // 'undef') ;
-        if (@$obs_runs < @$pruns) { push @ub_idx, $idx; next; }
 
+        if (@$obs_runs < @{$p->{runs}}) {
+            push @ub_idx, $idx;         # strict supersequences
+            next;
+        }
+
+        # Full prefix covered: compute score and DONE state
         my ($raw, $perrun_info) = _full_score_variance($obs_runs, $p);
-        next if $raw <= 0; # impossible
+        next if $raw <= 0;
+
         my $final = $raw * ($p->{weight} // 1.0);
+        my $is_done = $self->_pattern_is_done($obs_runs, $p, $last_kind);
+        if ($is_done) {
+            # Peak-at-DONE: keep the best score reached at DONE moments only
+            my $prev = $p->{_peak_done} // 0.0;
+            $p->{_peak_done} = ($final > $prev) ? $final : $prev;
+        }
+
         push @full, {
-            name       => ($p->{name} // $p->{id} // "pattern_$idx"),
-            score      => $final,
-            raw        => $raw,
-            idx        => $idx,
-            perrun_info=> $perrun_info,
-            runs_count => $p->{runs_count},
-            len_total  => $p->{len_total},
+            name        => ($p->{name} // $p->{id} // "pattern_$idx"),
+            score       => $final,             # instantaneous (for viz)
+            raw         => $raw,
+            idx         => $idx,
+            perrun_info => $perrun_info,
+            runs_count  => $p->{runs_count},
+            len_total   => $p->{len_total},
+            is_done     => $is_done,
+            peak_done   => ($p->{_peak_done} // 0.0),
         };
     }
 
     return unless @full;
 
-    # Rank by final score (higher better)
+    # Pick a "display best" for the line (unchanged tie logic)
     @full = sort { $b->{score} <=> $a->{score} } @full;
-    my $best = $full[0];
-
-    # Prefer longer FULL only if it's a TRUE supersequence of current best AND close in score
+    my $best_disp = $full[0];
     my $prom = $self->{prefer_longer_margin};
-    my $best_runs_ref = $self->{patterns}[$best->{idx}]{runs};
-    my @close_longers = grep {
-        $_->{runs_count} > $best->{runs_count}
-        && _runs_prefix($best_runs_ref, $self->{patterns}[$_->{idx}]{runs})
-        && $_->{score} >= $best->{score} - $prom
-    } @full;
+    my @close_longers = grep { $_->{runs_count} > $best_disp->{runs_count}
+                               && $_->{score} >= $best_disp->{score} - $prom } @full;
     if (@close_longers) {
         @close_longers = sort { $b->{runs_count} <=> $a->{runs_count} || $b->{score} <=> $a->{score} } @close_longers;
-        $best = $close_longers[0];
+        $best_disp = $close_longers[0];
     }
-
-    # Tie-break within ε: fewer runs, then shorter len, then higher score
-    my @near = grep { $best->{score} - $_->{score} <= $self->{tie_epsilon} } @full;
+    my @near = grep { $best_disp->{score} - $_->{score} <= $self->{tie_epsilon} } @full;
     if (@near > 1) {
         @near = sort {
-            $a->{runs_count}  <=> $b->{runs_count}  ||
-            $a->{len_total}   <=> $b->{len_total}   ||
+            $b->{runs_count}  <=> $a->{runs_count}  ||
+            $b->{len_total}   <=> $a->{len_total}   ||
             $b->{score}       <=> $a->{score}
         } @near;
-        $best = $near[0];
+        $best_disp = $near[0];
     }
 
-    # Compute UB among strict supersequences of the chosen best FULL
-    my $best_runs = $self->{patterns}[$best->{idx}]{runs};
-    $best_upperbound_w   = 0.0;
-    $best_upperbound_raw = 0.0;
-    $best_ub_idx         = -1;
-
-    for my $j (@ub_idx) {
+    # UBs: consider any pattern that is a plausible supersequence of the observation prefix
+    $best_ub_w = 0.0; $best_ub_raw = 0.0; $best_ub_idx = -1;
+    for my $j (0 .. $#{$self->{patterns}}) {
         my $q = $self->{patterns}[$j];
-        next unless _runs_prefix($best_runs, $q->{runs}); # only true supers of best
-        my $ub_raw = _prefix_upperbound_variance($obs_runs, $q);
-        # Apply patience scaling to non-best UB
-        $ub_raw = max(0.0, min(1.0, $ub_raw * ($self->{patience} // 1.0)));
-        my $ub_w   = $ub_raw * ($q->{weight} // 1.0);
-        if ($ub_w > $best_upperbound_w)    { $best_upperbound_w   = $ub_w; }
-        if ($ub_raw > $best_upperbound_raw){ $best_upperbound_raw = $ub_raw; $best_ub_idx = $j; }
+        next unless _runs_prefix($obs_runs, $q->{runs});            # symbol-prefix match
+        next if @$obs_runs >= @{$q->{runs}} && $self->_pattern_is_done($obs_runs, $q, $last_kind);
+        my ($ub_raw, undef) = _prefix_ub_with_perrun($obs_runs, $q);# optimistic suffix
+        my $ub_w = $ub_raw * ($q->{weight} // 1.0);
+        if ($ub_w > $best_ub_w)    { $best_ub_w   = $ub_w;  }
+        if ($ub_raw > $best_ub_raw){ $best_ub_raw = $ub_raw; $best_ub_idx = $j; }
     }
 
-    # DEBUG: dumps — timestamps relative to first edge
-    my $t0 = $self->{_first_event_t} // $t;
-    my $dt = $t - $t0;
+    # DEBUG VIS
+    my $t0   = $self->{_first_event_t} // $t;
+    my $dt   = $t - $t0;
     $self->_debug_dump_observation($obs_runs, $dt) if $self->{verbose} >= 2 && $self->{viz_enable};
-    $self->_debug_dump_candidates($obs_runs, \@full, $best_upperbound_w, $dt) if $self->{verbose} >= 2;
+    $self->_debug_dump_candidates($obs_runs, \@full, $best_ub_w, $dt) if $self->{verbose} >= 2;
 
-    # DEBUG: compact one-liner (throttled)
     if ($self->{verbose} >= 1) {
         my $line = sprintf("[t=+%.03fs] best full: %s score=%.3f, best UBw=%.3f UB=%.3f\n",
-                           $dt, $best->{name}, $best->{score}, $best_upperbound_w, $best_upperbound_raw);
-        my $emit = 1;
-        if ($self->{_last_debug_line} && $self->{_last_debug_line} eq $line) { $emit = 0; }
-        if ($emit) { print $line; $self->{_last_debug_line} = $line; }
+                           $dt, $best_disp->{name}, $best_disp->{score}, $best_ub_w, $best_ub_raw);
+        if (!$self->{_last_debug_line} || $self->{_last_debug_line} ne $line) {
+            print $line;
+            $self->{_last_debug_line} = $line;
+        }
     }
 
-    # Decision thresholds and guards
-    my $threshold     = $self->{commit_threshold};
-    my $eff_margin    = $self->{commit_margin};
-    my $best_last_sym = $self->{patterns}[$best->{idx}]{runs}[-1]{sym};
-    # reuse earlier $last_kind (remove duplicate 'my')
-    my $dot_end_guard = ($self->{require_release_for_dot_end}
-                         && defined $last_kind && $last_kind eq 'press'
-                         && $best_last_sym eq $self->{sym_press});
+    # --------- NEW: Peak-DONE decision ---------------------------------------
+    # Choose best DONE by peak; compare against max UB of others (with patience)
+    my $threshold  = $self->{commit_threshold};
+    my $margin     = $self->{commit_margin};
+    my $patience   = $self->{patience};
 
-    # Immediate commit if best FULL clearly beats any continuation by margin
-    if (!$dot_end_guard && $best->{raw} >= ($best_upperbound_raw + $eff_margin) && $best->{score} >= $threshold) {
-        _commit($self, $best->{name}, $best->{score}, $t);
+    my $best_done_idx   = -1;
+    my $best_done_score = 0.0;
+    for my $c (@full) {
+        if ($c->{peak_done} > $best_done_score) {
+            $best_done_score = $c->{peak_done};
+            $best_done_idx   = $c->{idx};
+        }
+    }
+
+    if ($best_done_idx >= 0 && $best_done_score >= $threshold) {
+        my $ub_competitors = 0.0;
+        for my $j (0 .. $#{$self->{patterns}}) {
+            next if $j == $best_done_idx;
+            my $q = $self->{patterns}[$j];
+            next unless _runs_prefix($obs_runs, $q->{runs});
+            next if @$obs_runs >= @{$q->{runs}} && $self->_pattern_is_done($obs_runs, $q, $last_kind);
+            my ($ub_raw_j, undef) = _prefix_ub_with_perrun($obs_runs, $q);
+            my $ub_w_j = ($ub_raw_j * ($q->{weight} // 1.0)) * $patience;
+            $ub_competitors = $ub_w_j if $ub_w_j > $ub_competitors;
+        }
+
+        if ($best_done_score >= $ub_competitors + $margin) {
+            my $name = $self->{patterns}[$best_done_idx]{name} // $self->{patterns}[$best_done_idx]{id} // "pattern_$best_done_idx";
+            $self->_commit($name, $best_done_score, $t);
+            return;
+        }
+    }
+    # -------------------------------------------------------------------------
+
+    # Safety: hard-stops if nothing can be decided for too long
+    my $idle_s = defined($self->{_last_event_t}) ? ($t - $self->{_last_event_t}) : 0;
+    my $span_s = defined($self->{_first_event_t}) ? ($t - $self->{_first_event_t}) : 0;
+
+    if ($self->{hard_stop_idle_s} && $idle_s >= $self->{hard_stop_idle_s}) {
+        $self->_no_match($t);
         return;
     }
-
-    # Timed commit window (simple: fixed cap); prefer simplicity until deadline logic lands
-    my $idle_s = defined($self->{_last_event_t}) ? ($t - $self->{_last_event_t}) : 0.0;
-    my $decision_cap = $self->{decision_timeout_s};
-
-    if (!$dot_end_guard && $best->{score} >= $threshold && $idle_s >= $decision_cap &&
-        ( $self->{ignore_ub_on_timeout} || $best->{raw} >= $best_upperbound_raw )) {
-        _commit($self, $best->{name}, $best->{score}, $t);
+    if ($self->{hard_stop_span_s} && $span_s >= $self->{hard_stop_span_s}) {
+        $self->_no_match($t);
         return;
     }
-
-    # Hard-stop / reset if nothing matched and we've been idle too long or spanned too long
-    my $span_s = defined($self->{_first_event_t}) ? ($t - $self->{_first_event_t}) : 0.0;
-    if ($self->{hard_stop_idle_s} && $idle_s >= $self->{hard_stop_idle_s}) { _no_match($self, $t); return; }
-    if ($self->{hard_stop_span_s} && $span_s >= $self->{hard_stop_span_s}) { _no_match($self, $t); return; }
 }
+
 
 # -----------------------------------------------------------------------------
 # Scoring (variance-driven)

@@ -1,7 +1,9 @@
 # Gesture Configuration File
 # Times are in quanta (1 quantum = 50ms)
-
-max_wait: 30  # Maximum quanta to wait before triggering (1.5s)
+---
+version: 3
+dot_ms: 20.000
+max_wait: 60  # Maximum quanta to wait before triggering (1.5s)
 
 patterns:
   - name: tap

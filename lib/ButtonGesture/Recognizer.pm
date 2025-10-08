@@ -604,7 +604,7 @@ sub _debug_dump_observation {
 sub _debug_dump_candidates {
     my ($self, $obs_runs, $full_ref, $best_ub_w, $dt) = @_;
     my $usr = $self->_viz_pattern_str($obs_runs, 1);
-    printf("%60s usr=\"%s\"\n", '', $usr);
+    printf("%44s usr=\"%s\"\n", '', $usr);
 
     my %seen_full = map { $self->{patterns}[ $_->{idx} ]{name} // $_->{idx} => 1 } @$full_ref;
 

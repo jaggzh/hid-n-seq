@@ -33,6 +33,14 @@ patterns:
   #     2: { type: press, variance: 4.688, weight: 1.000, samples: 12 }
   #     3: { type: release, variance: 3.161, weight: 1.000, samples: 12 }
   #     4: { type: press, variance: 0.700, weight: 1.000, samples: 12 }
+  - id: mediumpress
+    name: "mediumpress"
+    visual: ...........
+    # visual_numeric: .{44.1}
+    weight: 1.000
+    description: "Medium press"
+    runs:
+      0: { type: press, variance: 8.190, weight: 1.000, samples: 11 }
   - id: longpress
     name: "longpress"
     visual: ............................................

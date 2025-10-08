@@ -1,298 +1,217 @@
-#!/usr/bin/perl
-package ButtonGesture::Recognizer;
-
+package Recognizer;
+use v5.36;
 use strict;
 use warnings;
 use Time::HiRes qw(time);
-use List::Util qw(min max);
-use YAML::XS qw(LoadFile);
+use List::Util qw(sum min max);
 
-our $VERSION = '0.21';
-
-# -------------------------------------------------------------------
-# Overview
-# -------------------------------------------------------------------
-# Stream edges via feed_event('press'|'release', t).
-# Quantize into '.' (press/hold) and '~' (pause) using quantum_ms.
-#
-# Definitions: UB=Upper Bound (another candidate (ie. a super-sequence))
-#  has a theoretical maximum best fit, which forms part of the comparison
-#  against a shorter sequence that's been reached, to see if we stop and
-#  accept the shorter or try for a better super-sequence match.
-#
-# Matching (dot/tilde only):
-#   • One global time-stretch s ∈ [stretch_min,stretch_max] for a candidate.
-#   • Per-symbol elasticity (quanta) forgives small deviations.
-#   • Pattern weight biases ties (“prefer when in doubt”).
-#
-# Key behavior for single→double ambiguity:
-#   • We add a *virtual trailing run* at evaluation time that grows with real time
-#     ('.' if last edge was press; '~' if last edge was release). This makes both
-#     full scores and longer-pattern upper bounds evolve as you wait.
-#   • A pattern written with a trailing ')' means “terminal: ignore penalty on
-#     the last run if it is the (growing) virtual run”. This preserves a single
-#     click’s score as the pause grows, while the longer pattern’s UB changes.
-#
-# Decision:
-#   • Evaluate on releases and idle ticks.
-#   • If best FULL candidate beats the best upper bound (UB) of any longer
-#     pattern by an effective margin, COMMIT immediately.
-#   • Otherwise wait—up to a dynamic window (based on remaining time a longer
-#     supersequence could still take, using stretch_max) capped by decision_timeout_s.
-#
-# YAML schema:
-#   gestures: [ { name, pattern, weight, elasticity:{'.', '~'} }, ... ]
-#   or a top-level array of the same entries.
-#   Suffix markers (optional):
-#     ')'  → terminal: do not penalize last run if it is the virtual run
-#     '>'  → advisory “often a prefix” (used only for debug; matching unaffected)
-#
-# Tunables (constructor args) — behavior & practical ranges:
-#   quantum_ms        : ms per quantum (default 20). Typical 15–25.
-#   idle_timeout_s    : idle gap before evaluating in tick() (default 0.25).
-#   commit_threshold  : min FULL score to be eligible (default 0.75).
-#   commit_margin     : margin vs best UB to commit now (default 0.10).
-#   wait_preference   : 0..1; inflates effective margin & dynamic wait (default 0.60).
-#   decision_timeout_s: max patience once a FULL exists (default 0.30; use 0.30–0.40 for double-click).
-#   hard_stop_idle_s  : absolute idle wall-clock to emit NO_MATCH and reset (default 3.00).
-#   hard_stop_span_s  : max wall-clock from first edge to emit NO_MATCH (default 0=off).
-#   stretch_min/max   : global time-scale bounds (default 0.5..2.0).
-#   verbose           : 0 silent; 1 compact lines; 2 +tables+viz; 3 deep; timestamps always shown.
-#   gestures|config_file|callback
-#
-# Visualization (verbose >= 2):
-#   • Prints the live observed string (with virtual tail) and a candidate table.
-#   • Colorizes per-run matching: '.' shades of green, '~' shades of blue.
-#   • Mapping and scale can be overridden via viz_* args.
-#
-# KEY:
-#   DEBUG:verbose_*   — debug/logging controls and call sites
-#   VIS:viz_*         — visualization controls and helpers
-#
-# -------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Recognizer.pm  — variance-driven scoring + patience-weighted UBs
+# ----------------------------------------------------------------------------
+# Key changes in this refactor:
+#  • Per-run variance and per-run weight are first-class in scoring.
+#  • Pattern-level weight multiplies the raw fit to produce a final score.
+#  • Global stretch_min/max are removed. We match in QUANTA ("dots").
+#  • UB (upper bound) is optimistic: prefix scored as-is; unseen suffix = perfect.
+#  • New param: patience (default 1.0). We scale UB_raw of *non-best* candidates
+#    by this factor before comparing vs the best FULL. patience>1 waits longer;
+#    patience<1 commits sooner. (UB_raw is clamped to [0,1] after scaling.)
+#  • Hard-stop safety: idle and/or span hard caps emit NO_MATCH and reset.
+#  • Visualization hooks are preserved: _debug_dump_observation, _debug_dump_candidates.
+# ----------------------------------------------------------------------------
 
 sub new {
     my ($class, %a) = @_;
 
-    my $self = bless {
-        # config / I-O
-        config_file        => $a{config_file} // 'gestures.yaml',
-        gestures_raw       => $a{gestures} // [],
-        callback           => $a{callback} // sub { print "Action: $_[0]\n" },
-
-        # DEBUG:verbose_level (kept backward compatible with 'verbose')
-        verbose            => $a{verbose} // 0,   # 0 silent; 1 compact; 2 table+viz; 3 deep
-
-        # timing
-        quantum_ms         => (defined $a{quantum_ms} ? 0 + $a{quantum_ms} : 20),
-        quantum_s          => undef,
-        idle_timeout_s     => (defined $a{idle_timeout_s} ? 0.0 + $a{idle_timeout_s} : 0.25),
-
-        # scoring knobs
-        commit_threshold   => (defined $a{commit_threshold} ? 0.0 + $a{commit_threshold} : 0.75),
-        commit_margin      => (defined $a{commit_margin} ? 0.0 + $a{commit_margin} : 0.10),
-        wait_preference    => (defined $a{wait_preference} ? 0.0 + $a{wait_preference} : 0.60),
-        decision_timeout_s => (defined $a{decision_timeout_s} ? 0.0 + $a{decision_timeout_s} : 0.30),
-        hard_stop_idle_s   => (defined $a{hard_stop_idle_s} ? 0.0 + $a{hard_stop_idle_s} : 3.00),
-        hard_stop_span_s   => (defined $a{hard_stop_span_s} ? 0.0 + $a{hard_stop_span_s} : 0.00),
-        stretch_min        => (defined $a{stretch_min} ? 0.0 + $a{stretch_min} : 0.5),
-        stretch_max        => (defined $a{stretch_max} ? 0.0 + $a{stretch_max} : 2.0),
-        prefer_longer_margin => (defined $a{prefer_longer_margin} ? 0.0 + $a{prefer_longer_margin} : 0.12),
-
-        # VIS: top-level toggles (independent from 'verbose')
-        viz_enable         => exists $a{viz_enable} ? !!$a{viz_enable} : 1,
-        viz_scale          => (defined $a{viz_scale} ? 0.0 + $a{viz_scale} : 1.0),
-        viz_symbols        => $a{viz_symbols} // { '.' => '▉', '~' => '▂' },  # overridable glyphs
-        viz_show_colors    => (defined $a{viz_show_colors} ? !!$a{viz_show_colors} : 1),
-        viz_abbrev_max     => (defined $a{viz_abbrev_max} ? 0 + $a{viz_abbrev_max} : 60),
-        viz_pats_full      => exists $a{viz_pats_full} ? !!$a{viz_pats_full} : 1,
-        viz_user_bg_rgb    => $a{viz_user_bg_rgb} // [25,40,65],   # {ubg}  a24bg(30,45,50)
-        viz_pat_bg_rgb     => $a{viz_pat_bg_rgb}  // [40,40,40],   # {pbg}  a24bg(40,40,40)
-
-        # scoring emphasis — give presses more influence than pauses; prefer multi-press patterns
-        run_weight_dot     => (defined $a{run_weight_dot}   ? 0.0 + $a{run_weight_dot}   : 1.5),
-        run_weight_tilde   => (defined $a{run_weight_tilde} ? 0.0 + $a{run_weight_tilde} : 1.0),
-        press_bias         => (defined $a{press_bias}       ? 0.0 + $a{press_bias}       : 0.15), # prior for patterns with more '.' runs
-        tie_epsilon        => (defined $a{tie_epsilon}      ? 0.0 + $a{tie_epsilon}      : 0.02), # treat scores within ε as a tie
-        ignore_ub_on_timeout => exists $a{ignore_ub_on_timeout} ? !!$a{ignore_ub_on_timeout} : 1,
-		require_release_for_dot_end => exists $a{require_release_for_dot_end} ? !!$a{require_release_for_dot_end} : 1,
-
-        # runtime state
-        _events            => [],     # [ ['press'|'release', t], ... ]
-        _last_event_t      => undef,  # time of last edge
-        _first_event_t     => undef,  # time of first edge in current sequence
-        _last_debug_line   => undef,  # throttle
-
-        # compiled patterns
-        patterns           => [],     # [{ name, weight, runs:[{sym,len}], len_total, elasticity{.,~}, terminal, continues }]
-        _have_longers      => 0,      # any strict supersequence pair exists?
-    }, $class;
+    my $self = bless({
+        # time
+        quantum_ms         => defined $a{quantum_ms} ? 0.0 + $a{quantum_ms} : 20.0, # ms per dot
+        # scoring / decisions
+        commit_threshold    => defined $a{commit_threshold}    ? 0.0 + $a{commit_threshold}    : 0.75,
+        commit_margin       => defined $a{commit_margin}       ? 0.0 + $a{commit_margin}       : 0.10,
+        prefer_longer_margin=> defined $a{prefer_longer_margin}? 0.0 + $a{prefer_longer_margin}: 0.12,
+        tie_epsilon         => defined $a{tie_epsilon}         ? 0.0 + $a{tie_epsilon}         : 0.005,
+        decision_timeout_s  => defined $a{decision_timeout_s}  ? 0.0 + $a{decision_timeout_s}  : 0.30,
+        ignore_ub_on_timeout=> exists $a{ignore_ub_on_timeout} ? !!$a{ignore_ub_on_timeout}    : 0,
+        require_release_for_dot_end => exists $a{require_release_for_dot_end} ? !!$a{require_release_for_dot_end} : 1,
+        # safety
+        hard_stop_idle_s    => defined $a{hard_stop_idle_s}    ? 0.0 + $a{hard_stop_idle_s}    : 1.00,
+        hard_stop_span_s    => defined $a{hard_stop_span_s}    ? 0.0 + $a{hard_stop_span_s}    : 0.00,
+        # UB patience tuning (global)
+        patience            => defined $a{patience}            ? 0.0 + $a{patience}            : 1.00,
+        # symbol config
+        sym_press           => defined $a{sym_press}           ? $a{sym_press}                 : '.',
+        sym_release         => defined $a{sym_release}         ? $a{sym_release}               : '~',
+        # verbosity / viz
+        verbose             => defined $a{verbose}             ? 0 + $a{verbose}               : 1,
+        viz_enable          => exists $a{viz_enable}           ? !!$a{viz_enable}              : 1,
+        # defaults if pattern-run variance/weight missing
+        default_var_press   => defined $a{default_var_press}   ? 0.0 + $a{default_var_press}   : 1.0, # dots
+        default_var_release => defined $a{default_var_release} ? 0.0 + $a{default_var_release} : 2.0, # dots
+        default_run_weight  => defined $a{default_run_weight}  ? 0.0 + $a{default_run_weight}  : 1.0,
+        # inputs
+        patterns            => $a{patterns} || [],
+        callback            => $a{callback},
+        # runtime
+        _events             => [],   # [ [press|release, t_abs], ... ]
+        _first_event_t      => undef,
+        _last_event_t       => undef,
+        _last_debug_line    => undef,
+    }, $class);
 
     $self->{quantum_s} = $self->{quantum_ms} / 1000.0;
 
-    # VIS: precompute ANSI backgrounds
-    $self->{_viz_user_bg} = _ansi_bg(@{$self->{viz_user_bg_rgb}});
-    $self->{_viz_pat_bg}  = _ansi_bg(@{$self->{viz_pat_bg_rgb}});
+    # Precompute pattern structures (len per run in dots, total len/weight)
+    _precompute_patterns($self);
 
-    $self->_load_and_compile();
     return $self;
 }
 
-# -------------------------------------------------------------------
-# Public API
-# -------------------------------------------------------------------
-
-sub feed_event {
-    my ($self, $kind, $t) = @_;
-    $t //= time();
-    die "feed_event kind must be 'press' or 'release'" unless $kind eq 'press' || $kind eq 'release';
-
-    push @{$self->{_events}}, [$kind, $t];
-    $self->{_last_event_t} = $t;
-    $self->{_first_event_t} = $self->{_first_event_t} // $t;
-
-    # DEBUG:verbose_flow — evaluate right after releases to minimize latency
-    $self->_evaluate_if_ready($t) if $kind eq 'release';
-}
-
-sub tick {
-    my ($self, $t) = @_;
-    $t //= time();
-    return unless @{$self->{_events}};
-    my $since_last = defined($self->{_last_event_t}) ? ($t - $self->{_last_event_t}) : 0;
-    if ($since_last >= $self->{idle_timeout_s}) {
-        # DEBUG:verbose_flow — idle evaluation (with virtual trailing run)
-        $self->_evaluate_if_ready($t);
-    }
-}
-
-sub periodic_update {    # alias for older callers
-    my ($self, $t) = @_;
-    $self->tick($t);
-}
-
 sub reset {
-    my $self = shift;
-    $self->{_events}         = [];
-    $self->{_last_event_t}   = undef;
-    $self->{_first_event_t}  = undef;
-    $self->{_last_debug_line}= undef;
+    my ($self) = @_;
+    $self->{_events} = [];
+    $self->{_first_event_t} = undef;
+    $self->{_last_event_t}  = undef;
+    $self->{_last_debug_line} = undef;
 }
 
-# -------------------------------------------------------------------
-# Internal: Configuration / Compilation
-# -------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# External interface: feed edges and ticks
+# -----------------------------------------------------------------------------
+sub press   { my ($self, $t) = @_; $self->_edge('press',   defined $t ? $t : time()); }
+sub release { my ($self, $t) = @_; $self->_edge('release', defined $t ? $t : time()); }
+sub tick    { my ($self, $t) = @_; $self->_evaluate_if_ready(defined $t ? $t : time()); }
 
-sub _load_and_compile {
-    my $self = shift;
-
-    my $gest = $self->{gestures_raw};
-    if (!@$gest && -f $self->{config_file}) {
-        my $raw = eval { LoadFile($self->{config_file}) };
-        warn "Config load error: $@" if $@ && $self->{verbose};
-        if (!$@ && defined $raw) {
-            if (ref($raw) eq 'HASH') {
-                $gest = $raw->{gestures} // $raw->{patterns} // [];
-            } elsif (ref($raw) eq 'ARRAY') {
-                $gest = $raw;
-            }
-        }
-    }
-
-    my @compiled;
-    for my $g (@$gest) {
-        next unless ref($g) eq 'HASH' && defined $g->{pattern};
-        my $name   = defined $g->{name} ? $g->{name} : 'unnamed';
-        my $weight = defined $g->{weight} ? 0.0 + $g->{weight} : 1.0;
-        my $elas   = $g->{elasticity} // {};
-        my ($canon, $terminal, $continues) = _canonicalize_pattern($g->{pattern});
-        my $runs = _runs_from_pattern($canon);
-        next unless @$runs;
-        my $len_total = 0; $len_total += $_->{len} for @$runs;
-        my $n_press   = scalar grep { $_->{sym} eq '.' } @$runs;
-        my $w_eff     = $weight * (1.0 + ($self->{press_bias} // 0) * ($n_press > 0 ? $n_press - 1 : 0));
-
-        push @compiled, {
-            name       => $name,
-            weight     => $weight,
-            w_eff      => $w_eff,      # effective weight used in scoring (with press_bias prior)
-            n_press    => $n_press,    # number of '.' runs (used for tie-breaks)
-            runs       => $runs,
-            len_total  => $len_total,
-            elasticity => { '.' => ($elas->{'.'} // 0), '~' => ($elas->{'~'} // 0) },
-            terminal   => $terminal ? 1 : 0, # ignore penalty on last run if it's virtual tail
-            continues  => $continues ? 1 : 0,
-        };
-    }
-
-    @compiled = sort { $a->{len_total} <=> $b->{len_total} } @compiled;
-
-    my $have_longers = 0;
-    for my $i (0..$#compiled) {
-        for my $j ($i+1..$#compiled) {
-            if (_runs_prefix($compiled[$i]{runs}, $compiled[$j]{runs})) {
-                $have_longers = 1; last;
-            }
-        }
-        last if $have_longers;
-    }
-
-    $self->{patterns}      = \@compiled;
-    $self->{_have_longers} = $have_longers;
+sub _edge {
+    my ($self, $kind, $t) = @_;
+    push @{$self->{_events}}, [$kind, $t];
+    $self->{_first_event_t} //= $t;
+    $self->{_last_event_t}    = $t;
+    $self->_evaluate_if_ready($t);
 }
 
-# -------------------------------------------------------------------
-# Internal: Evaluation / Decision
-# -------------------------------------------------------------------
+# -----------------------------------------------------------------------------
+# Pattern preprocessing
+# -----------------------------------------------------------------------------
+sub _precompute_patterns {
+    my ($self) = @_;
+    my $qs = $self->{quantum_s};
+    my $sp = $self->{sym_press};
+    my $sr = $self->{sym_release};
 
+    for my $p (@{$self->{patterns}}) {
+        # Expected fields per pattern:
+        #   name, id (optional), weight (pattern-level),
+        #   runs => [ { type: 'press'|'release', sym: '.'|'~', len: <dots>, variance: <dots>, weight: <w> }, ... ]
+        # If sym missing, infer from type; if len missing, infer from visual string length if present.
+        $p->{weight} = 1.0 unless defined $p->{weight};
+
+        # Normalize runs:
+        #  - if HASH (indexed map) -> ordered ARRAY
+        #  - if missing but visual present -> parse visual (supports .{N}/~{N})
+        if (exists $p->{runs} && ref($p->{runs}) eq 'HASH') {
+            my @ord = map { $p->{runs}{$_} } sort { $a <=> $b } keys %{$p->{runs}};
+            $p->{runs} = \@ord;
+        }
+        if (!exists $p->{runs} && exists $p->{visual}) {
+            $p->{runs} = _runs_from_visual($p->{visual}, $sp, $sr);
+        }
+        next unless ref($p->{runs}) eq 'ARRAY' && @{$p->{runs}};
+
+        my $len_total = 0.0;
+        my $w_total   = 0.0;
+        for my $r (@{$p->{runs}}) {
+            $r->{type} //= ($r->{sym} && $r->{sym} eq $sr) ? 'release' : 'press';
+            $r->{sym}  //= ($r->{type} eq 'release') ? $sr : $sp;
+            $r->{len}  = 0.0 + ($r->{len} // 1);
+            $r->{variance} //= ($r->{type} eq 'release') ? $self->{default_var_release} : $self->{default_var_press};
+            $r->{weight}   //= $self->{default_run_weight};
+            $len_total += $r->{len};
+            $w_total   += $r->{weight};
+        }
+        $p->{len_total}  = $len_total;
+        $p->{run_w_sum}  = $w_total;
+        $p->{runs_count}    = scalar(@{$p->{runs}});
+    }
+}
+
+sub _runs_from_visual {
+    my ($visual, $sp, $sr) = @_;
+    my @runs; my $i = 0;
+    my @ch = split //, ($visual // '');
+    while ($i <= $#ch) {
+        my $c = $ch[$i];
+        if ($c eq $sp || $c eq $sr) {
+            my $type = ($c eq $sr) ? 'release' : 'press';
+            # brace form: .{N} / ~{N}  (N in dots, may be float)
+            if ($i+1 <= $#ch && $ch[$i+1] eq '{') {
+                my $j = $i + 2; my $num = '';
+                while ($j <= $#ch && $ch[$j] ne '}') { $num .= $ch[$j]; $j++ }
+                if ($j <= $#ch && $ch[$j] eq '}') {
+                    my $dots = 0.0 + $num;
+                    push @runs, { sym=>$c, type=>$type, len=>$dots };
+                    $i = $j + 1;
+                    next;
+            }
+        } else {
+            # ignore unknown for now (visual braces handled upstream, not here)
+        }
+            # plain glyph run
+            my $k = $i + 1; my $cnt = 1;
+            $cnt++, $k++ while ($k <= $#ch && $ch[$k] eq $c);
+            push @runs, { sym=>$c, type=>$type, len=>$cnt };
+            $i = $k; next;
+    }
+        $i++;
+    }
+    return \@runs;
+}
+
+# -----------------------------------------------------------------------------
+# Core evaluation
+# -----------------------------------------------------------------------------
 sub _evaluate_if_ready {
     my ($self, $t) = @_;
 
-    my ($obs_runs, $virtual_sym) = _obs_runs_with_virtual($self->{_events}, $self->{quantum_s}, $t);
+    my ($obs_runs, $virtual_sym) = _obs_runs_with_virtual(
+        $self->{_events}, $self->{quantum_s}, $t, $self->{sym_press}, $self->{sym_release}
+    );
     return unless @$obs_runs;
 
-    my @full = ();         # full matches we could commit now
-    my $best_upperbound_w   = 0.0;  # weighted UB (for display)
-    my $best_upperbound_raw = 0.0;  # unweighted UB (for decision logic)
+    my @full = ();
+    my $best_upperbound_w   = 0.0;
+    my $best_upperbound_raw = 0.0;
     my $best_ub_idx         = -1;
-    my @ub_idx = ();                # candidates to consider for UB after we pick best FULL
+    my @ub_idx = ();
     my ($last_kind, $last_t) = @{$self->{_events}[-1]};
 
-    # Score all FULL-length candidates; collect strict-longer candidates for UB pass
+    # Score FULL candidates; collect strict-longers for UB pass
     for my $idx (0..$#{$self->{patterns}}) {
         my $p = $self->{patterns}[$idx];
+        my $pruns = $p->{runs};
+        if (@$obs_runs < @$pruns) { push @ub_idx, $idx; next; }
 
-        if (@$obs_runs < @{$p->{runs}}) {
-            push @ub_idx, $idx;   # consider later, but only supersequences of the best FULL
-            next;
-        }
-
-        my ($score, $s, $perrun) = $self->_full_score(
-            $obs_runs, $p, $virtual_sym,
-            $self->{stretch_min}, $self->{stretch_max}
-        );
-        next if $score <= 0;
-
-        my $final = $score * ($p->{w_eff} // $p->{weight});
+        my ($raw, $perrun) = _full_score_variance($obs_runs, $p);
+        next if $raw <= 0; # impossible
+        my $final = $raw * ($p->{weight} // 1.0);
         push @full, {
-            name       => $p->{name},
-            score      => $final,
-            raw        => $score,
-            s          => $s,
+            name       => ($p->{name} // $p->{id} // "pattern_$idx"),
+            score      => $final,    # final = raw * pattern weight
+            raw        => $raw,      # 0..1
             idx        => $idx,
             perrun     => $perrun,
-            runs_count => scalar(@{$p->{runs}}),
+            runs_count => $p->{runs_count},
             len_total  => $p->{len_total},
         };
     }
 
     return unless @full;
 
-    # Rank by score first (higher is better in this normalized space)
+    # Rank by final score (higher better)
     @full = sort { $b->{score} <=> $a->{score} } @full;
     my $best = $full[0];
 
-    # Prefer a longer FULL match only if it is a TRUE supersequence of the current best and close in score.
+    # Prefer longer FULL only if it's a TRUE supersequence of current best AND close in score
     my $prom = $self->{prefer_longer_margin};
     my $best_runs_ref = $self->{patterns}[$best->{idx}]{runs};
     my @close_longers = grep {
@@ -305,7 +224,7 @@ sub _evaluate_if_ready {
         $best = $close_longers[0];
     }
 
-    # Tie-break within ε: prefer fewer runs, then shorter canonical length, then higher score
+    # Tie-break within ε: fewer runs, then shorter len, then higher score
     my @near = grep { $best->{score} - $_->{score} <= $self->{tie_epsilon} } @full;
     if (@near > 1) {
         @near = sort {
@@ -316,7 +235,7 @@ sub _evaluate_if_ready {
         $best = $near[0];
     }
 
-    # Compute UB only among strict supersequences of the chosen best FULL
+    # Compute UB among strict supersequences of the chosen best FULL
     my $best_runs = $self->{patterns}[$best->{idx}]{runs};
     $best_upperbound_w   = 0.0;
     $best_upperbound_raw = 0.0;
@@ -324,16 +243,16 @@ sub _evaluate_if_ready {
 
     for my $j (@ub_idx) {
         my $q = $self->{patterns}[$j];
-        next unless _runs_prefix($best_runs, $q->{runs});   # only true supersequences of 'best'
-        my $ub_raw = $self->_prefix_upperbound(
-            $obs_runs, $q, $self->{stretch_min}, $self->{stretch_max}
-        );
-        my $ub_w = $ub_raw * ($q->{w_eff} // $q->{weight});
-        if ($ub_w   > $best_upperbound_w)   { $best_upperbound_w   = $ub_w; }
-        if ($ub_raw > $best_upperbound_raw) { $best_upperbound_raw = $ub_raw; $best_ub_idx = $j; }
+        next unless _runs_prefix($best_runs, $q->{runs}); # only true supers of best
+        my $ub_raw = _prefix_upperbound_variance($obs_runs, $q);
+        # Apply patience scaling to non-best UB
+        $ub_raw = max(0.0, min(1.0, $ub_raw * ($self->{patience} // 1.0)));
+        my $ub_w   = $ub_raw * ($q->{weight} // 1.0);
+        if ($ub_w > $best_upperbound_w)    { $best_upperbound_w   = $ub_w; }
+        if ($ub_raw > $best_upperbound_raw){ $best_upperbound_raw = $ub_raw; $best_ub_idx = $j; }
     }
 
-    # DEBUG: verbose dumps — timestamps relative to first edge
+    # DEBUG: dumps — timestamps relative to first edge
     my $t0 = $self->{_first_event_t} // $t;
     my $dt = $t - $t0;
     $self->_debug_dump_observation($obs_runs, $dt) if $self->{verbose} >= 2 && $self->{viz_enable};
@@ -344,51 +263,153 @@ sub _evaluate_if_ready {
         my $line = sprintf("[t=+%.03fs] best full: %s score=%.3f, best UBw=%.3f UB=%.3f\n",
                            $dt, $best->{name}, $best->{score}, $best_upperbound_w, $best_upperbound_raw);
         my $emit = 1;
-        if ($self->{_last_debug_line} && $self->{_last_debug_line} eq $line) {
-            $emit = 0; # identical line; avoid spam
-        }
-        if ($emit) {
-            print $line;
-            $self->{_last_debug_line} = $line;
-        }
+        if ($self->{_last_debug_line} && $self->{_last_debug_line} eq $line) { $emit = 0; }
+        if ($emit) { print $line; $self->{_last_debug_line} = $line; }
     }
 
     # Decision thresholds and guards
     my $threshold     = $self->{commit_threshold};
-    my $eff_margin    = $self->{commit_margin} * (1.0 + $self->{wait_preference});
+    my $eff_margin    = $self->{commit_margin};
     my $best_last_sym = $self->{patterns}[$best->{idx}]{runs}[-1]{sym};
+    # reuse earlier $last_kind (remove duplicate 'my')
     my $dot_end_guard = ($self->{require_release_for_dot_end}
                          && defined $last_kind && $last_kind eq 'press'
-                         && $best_last_sym eq '.');
-    my $idle_s = defined($self->{_last_event_t}) ? ($t - $self->{_last_event_t}) : 0;
-    my $decision_cap = $self->{decision_timeout_s};
-    my $remain_s_max = $self->_max_remaining_time_for_any_supersequence($best->{idx});
-    if ($remain_s_max > 0) {
-        my $dynamic_window = $remain_s_max * (1.0 + $self->{wait_preference});
-        $decision_cap = min($decision_cap, $dynamic_window);
-        $decision_cap = $dynamic_window;  # respect UB: wait as long as a real supersequence might take
+                         && $best_last_sym eq $self->{sym_press});
+
+    # Immediate commit if best FULL clearly beats any continuation by margin
+    if (!$dot_end_guard && $best->{raw} >= ($best_upperbound_raw + $eff_margin) && $best->{score} >= $threshold) {
+        _commit($self, $best->{name}, $best->{score}, $t);
+        return;
     }
 
-    # Timed commit (respects ignore_ub_on_timeout)
-    if (!$dot_end_guard
-        && $best->{score} >= $threshold
-        && $idle_s >= $decision_cap
-        && ( $self->{ignore_ub_on_timeout} || $best->{raw} >= $best_upperbound_raw )) {
-        $self->_commit($best->{name}, $best->{score}, $t);
+    # Timed commit window (simple: fixed cap); prefer simplicity until deadline logic lands
+    my $idle_s = defined($self->{_last_event_t}) ? ($t - $self->{_last_event_t}) : 0.0;
+    my $decision_cap = $self->{decision_timeout_s};
+
+    if (!$dot_end_guard && $best->{score} >= $threshold && $idle_s >= $decision_cap &&
+        ( $self->{ignore_ub_on_timeout} || $best->{raw} >= $best_upperbound_raw )) {
+        _commit($self, $best->{name}, $best->{score}, $t);
         return;
     }
 
     # Hard-stop / reset if nothing matched and we've been idle too long or spanned too long
-    my $span_s = defined($self->{_first_event_t}) ? ($t - $self->{_first_event_t}) : 0;
-    if ($self->{hard_stop_idle_s} && $idle_s >= $self->{hard_stop_idle_s}) {
-        $self->_no_match($t);
-        return;
+    my $span_s = defined($self->{_first_event_t}) ? ($t - $self->{_first_event_t}) : 0.0;
+    if ($self->{hard_stop_idle_s} && $idle_s >= $self->{hard_stop_idle_s}) { _no_match($self, $t); return; }
+    if ($self->{hard_stop_span_s} && $span_s >= $self->{hard_stop_span_s}) { _no_match($self, $t); return; }
+}
+
+# -----------------------------------------------------------------------------
+# Scoring (variance-driven)
+# -----------------------------------------------------------------------------
+# _full_score_variance: raw in [0,1]; runs beyond pattern length ignored.
+# raw = (sum_j w_j * per_run_score_j) / (sum_j w_j), where per_run_score_j = exp(-0.5 * z^2)
+#   and z = (obs_len_dots - mean_len_dots) / max(variance_dots, eps)
+# ----------------------------------------------------------------------------
+sub _full_score_variance {
+    my ($obs_runs, $p) = @_;
+    my $pruns = $p->{runs};
+    my $L = scalar(@$pruns);
+
+    my $w_sum = 0.0; my $acc = 0.0; my @per;
+    for my $i (0..$L-1) {
+        my $r  = $pruns->[$i];
+        my $or = $obs_runs->[$i];     # FULL guarantees exists
+        my $mu = 0.0 + ($r->{len} // 1);
+        my $sd = 0.0 + ($r->{variance} // 1.0);
+        my $w  = 0.0 + ($r->{weight} // 1.0);
+        my $x  = 0.0 + ($or->{len} // 0);
+        my $eps = 0.25; # dots, stability
+        my $z  = ($sd > $eps) ? (($x - $mu)/$sd) : (($x - $mu)/$eps);
+        my $s  = exp(-0.5 * $z * $z);
+        $acc  += $w * $s;
+        $w_sum+= $w;
+        push @per, $s;
     }
+    return ( ($w_sum>0 ? $acc/$w_sum : 0.0), \@per );
+}
+
+# UB for a longer pattern q: prefix scored as-is; suffix assumed perfect (score=1)
+sub _prefix_upperbound_variance {
+    my ($obs_runs, $q) = @_;
+    my $qruns = $q->{runs};
+    my $K = scalar(@$obs_runs);
+
+    my $w_sum = 0.0; my $acc = 0.0;
+    # prefix runs (0..K-1)
+    for my $i (0..$K-1) {
+        my $r  = $qruns->[$i];
+        last unless defined $r; # if obs longer than q (shouldn't be for UB)
+        my $mu = 0.0 + ($r->{len} // 1);
+        my $sd = 0.0 + ($r->{variance} // 1.0);
+        my $w  = 0.0 + ($r->{weight} // 1.0);
+        my $x  = 0.0 + ($obs_runs->[$i]{len} // 0);
+        my $eps = 0.25;
+        my $z  = ($sd > $eps) ? (($x - $mu)/$sd) : (($x - $mu)/$eps);
+        my $s  = exp(-0.5 * $z * $z);
+        $acc  += $w * $s;
+        $w_sum+= $w;
+    }
+    # suffix runs (K..end) get perfect 1.0 each
+    for my $i ($K..$#$qruns) {
+        my $w = 0.0 + ($qruns->[$i]{weight} // 1.0);
+        $acc  += $w * 1.0;
+        $w_sum+= $w;
+    }
+    return ($w_sum>0 ? $acc/$w_sum : 0.0);
+}
+
+# -----------------------------------------------------------------------------
+# Observation utilities
+# -----------------------------------------------------------------------------
+sub _obs_runs_with_virtual {
+    my ($events, $quantum_s, $t, $sym_press, $sym_release) = @_;
+    return ([], undef) unless @$events;
+
+    my @runs;  # [{sym, len}], in dots (quantized)
+    my ($cur_sym, $cur_start) = (undef, undef);
+
+    # Events are edge timestamps relative to absolute time; we walk pairs
+    for (my $i=0; $i<@$events; $i++) {
+        my ($kind, $te) = @{$events->[$i]};
+        if (!defined $cur_sym) {
+            $cur_sym   = ($kind eq 'press') ? $sym_press : $sym_release;
+            $cur_start = $te;
+        } else {
+            # edge toggles run
+            my $len_s = $te - $cur_start;
+            my $len_d = int(($len_s / $quantum_s) + 0.5);
+            $len_d = 1 if $len_d < 1;  # ensure visible dot
+            push @runs, { sym=>$cur_sym, len=>$len_d };
+            $cur_sym   = ($kind eq 'press') ? $sym_press : $sym_release;
+            $cur_start = $te;
+        }
+    }
+    # virtual trailing run to "now"
+    if (defined $cur_sym && defined $cur_start) {
+        my $len_s = $t - $cur_start;
+        my $len_d = int(($len_s / $quantum_s) + 0.5);
+        $len_d = 1 if $len_d < 1;
+        push @runs, { sym=>$cur_sym, len=>$len_d };
+    }
+
+    return (\@runs, ($cur_sym // undef));
+}
+
+# -----------------------------------------------------------------------------
+# Helpers
+# -----------------------------------------------------------------------------
+sub _runs_prefix {
+    my ($a_ref, $b_ref) = @_;
+    my $n = scalar(@$a_ref);
+    return 0 unless scalar(@$b_ref) > $n; # strict supersequence only
+    for my $i (0..$n-1) {
+        return 0 unless ($a_ref->[$i]{sym} // '') eq ($b_ref->[$i]{sym} // '');
+    }
+    return 1;
 }
 
 sub _commit {
     my ($self, $name, $score, $t) = @_;
-    # DEBUG:verbose_commit
     print sprintf("[t=+%.03fs] TRIGGERED: %s (score: %.3f)\n",
                   ($self->{_first_event_t} ? $t - $self->{_first_event_t} : 0.0),
                   $name, $score) if $self->{verbose};
@@ -404,522 +425,31 @@ sub _no_match {
     $self->reset();
 }
 
-# Longest additional time any longer pattern would still need, using stretch_max (be patient)
-sub _max_remaining_time_for_any_supersequence {
-    my ($self, $best_idx) = @_;
-    return 0 unless $self->{_have_longers};
-    my $best_runs = $self->{patterns}[$best_idx]{runs};
-    my $best_len  = $self->{patterns}[$best_idx]{len_total} // 0;
-
-    my $q_s  = $self->{quantum_s} // 0.020;  # seconds per quantum (fallback 20ms)
-    my $smax = $self->{stretch_max} // 1.0;
-
-    my $remain_max_s = 0.0;
-    for my $j (0 .. $#{$self->{patterns}}) {
-        next if $j == $best_idx;
-        my $q = $self->{patterns}[$j];
-        next unless _runs_prefix($best_runs, $q->{runs});         # only true supersequences
-        next unless @{$q->{runs}} > @{$best_runs};                # strictly longer
-        my $rem_len = ($q->{len_total} // 0) - $best_len;         # remaining quanta
-        next if $rem_len <= 0;
-        my $rem_s = $rem_len * $q_s * $smax;                      # worst-case time at max stretch
-        $remain_max_s = $rem_s if $rem_s <=> $remain_max_s;       # track max
-    }
-    return $remain_max_s;
-}
-
-
-# -------------------------------------------------------------------
-# Matching primitives
-# -------------------------------------------------------------------
-
-# Convert events to runs and append a *virtual* trailing run to "now"
-sub _obs_runs_with_virtual {
-    my ($events, $q, $t_now) = @_;
-    return ([], undef) unless @$events >= 1;
-
-    my @runs;
-    # Build completed spans between edges
-    for my $i (0..$#$events-1) {
-        my ($pk, $pt) = @{$events->[$i]};
-        my ($ck, $ct) = @{$events->[$i+1]};
-        my $dur = $ct - $pt;
-        my $quanta = max(1, int($dur / $q + 0.5));
-        my $sym = ($pk eq 'press') ? '.' : '~';
-        if (@runs && $runs[-1]{sym} eq $sym) {
-            $runs[-1]{len} += $quanta;
-        } else {
-            push @runs, { sym => $sym, len => $quanta };
-        }
-    }
-
-    # Add virtual tail from last edge → now
-    my ($lk, $lt) = @{$events->[-1]};
-    my $v_dur = $t_now - $lt;
-    my $v_q   = max(1, int($v_dur / $q + 0.5));
-    my $v_sym = ($lk eq 'press') ? '.' : '~';
-
-    if (@runs && $runs[-1]{sym} eq $v_sym) {
-        $runs[-1]{len} += $v_q;
-    } else {
-        push @runs, { sym => $v_sym, len => $v_q };
-    }
-
-    return (\@runs, $v_sym);
-}
-
-# Score a FULL candidate using first |p| runs of observation.
-# If pattern is 'terminal' and the last compared run is the *virtual* run,
-# ignore penalty on that last run (indeterminate trailing pause/hold).
-sub _full_score {
-    my ($self, $obs_runs, $p, $virtual_sym, $smin, $smax) = @_;
-    my $k = @{$p->{runs}};
-    return (0, 1.0, undef) if @$obs_runs < $k;
-
-    my @o = @$obs_runs[0..$k-1];
-
-    # strict symbol agreement
-    for my $i (0..$#o) {
-        return (0, 1.0, undef) if $o[$i]{sym} ne $p->{runs}[$i]{sym};
-    }
-
-    my $sum_o = 0; $sum_o += $_->{len} for @o;
-    my $sum_r = 0; $sum_r += $_->{len} for @{$p->{runs}};
-    return (0, 1.0, undef) if $sum_r == 0;
-
-    my $s = $sum_o / $sum_r;
-    $s = ($s < $smin) ? $smin : ($s > $smax ? $smax : $s);
-
-    my $err = 0;
-    my $den = 0;
-    my @perrun; # VIS:viz_perrun — [{sym, rlen_scaled, olen, tol, pen}]
-    for my $i (0..$#o) {
-        my $sym = $p->{runs}[$i]{sym};
-        my $rlen_scaled = max(1, int($p->{runs}[$i]{len} * $s + 0.5));
-        my $olen = $o[$i]{len};
-        my $tol = $p->{elasticity}{$sym} // 0;
-
-        my $pen;
-        if ($p->{terminal} && $i == $#o && $sym eq $virtual_sym) {
-            # Terminal semantics: do not penalize last run if it's the virtual tail
-            $pen = 0;
-        } else {
-            my $diff = abs($olen - $rlen_scaled);
-            $pen = ($diff > $tol) ? ($diff - $tol) : 0;
-        }
-
-        my $rw = ($sym eq '.') ? $self->{run_weight_dot} : $self->{run_weight_tilde};
-        $err += $rw * $pen;              # weighted penalty
-        $den += $rw * $rlen_scaled;      # weighted “ideal mass”
-
-        push @perrun, { sym => $sym, r => $rlen_scaled, o => $olen, tol => $tol, pen => $pen };
-    }
-
-    my $score = _score_from_err_den($err, $den);
-    return ($score, $s, \@perrun);
-}
-
-# Optimistic upper bound for a longer pattern given current obs prefix
-# (prefix compared with virtual tail included; future unmatched runs assumed perfect)
-sub _prefix_upperbound {
-    my ($self, $obs_runs, $p, $smin, $smax) = @_;
-    my $k = @$obs_runs;
-    return 0 if $k == 0;
-    return 0 if $k > @{$p->{runs}};
-
-    my @pref = @{$p->{runs}}[0..$k-1];
-
-    # compute s on prefix
-    my $sum_o = 0; $sum_o += $_->{len} for @$obs_runs;
-    my $sum_r = 0; $sum_r += $_->{len} for @pref;
-    return 0 if $sum_r == 0;
-
-    my $s = $sum_o / $sum_r;
-    $s = ($s < $smin) ? $smin : ($s > $smax ? $smax : $s);
-
-    my $err = 0;
-    my $den = 0;
-    for my $i (0..$#pref) {
-        my $sym = $pref[$i]{sym};
-        my $rlen_scaled = max(1, int($pref[$i]{len} * $s + 0.5));
-        my $olen = $obs_runs->[$i]{len};
-        my $tol = $p->{elasticity}{$sym} // 0;
-
-        my $diff = abs($olen - $rlen_scaled);
-        my $pen  = ($diff > $tol) ? ($diff - $tol) : 0;
-
-        my $rw = ($sym eq '.') ? $self->{run_weight_dot} : $self->{run_weight_tilde};
-        $err += $rw * $pen;              # weighted penalty
-        $den += $rw * $rlen_scaled;      # weighted ideal
-    }
-
-    # optimistic: remaining runs perfect
-    for my $i ($k..$#{$p->{runs}}) {
-        my $sym = $p->{runs}[$i]{sym};
-        my $rlen_scaled = max(1, int($p->{runs}[$i]{len} * $s + 0.5));
-        my $rw = ($sym eq '.') ? $self->{run_weight_dot} : $self->{run_weight_tilde};
-        $den += $rw * $rlen_scaled;
-    }
-
-    return _score_from_err_den($err, $den);
-}
-
-# Compute per-run alignment for the longest matching prefix (including virtual-tail semantics).
-# Returns: (\@perrun, $k, $s) where $k is number of aligned runs and $s is the chosen scale.
-sub _perrun_prefix_alignment {
-    my ($obs_runs, $p, $virtual_sym, $smin, $smax) = @_;
-    return ([], 0, 1.0) unless @$obs_runs;
-
-    my $kmax = (@$obs_runs < @{$p->{runs}}) ? @$obs_runs : scalar(@{$p->{runs}});
-    my $k = 0;
-    my $sum_o = 0;
-    my $sum_r = 0;
-
-    for my $i (0..$kmax-1) {
-        last if $obs_runs->[$i]{sym} ne $p->{runs}[$i]{sym};
-        $sum_o += $obs_runs->[$i]{len};
-        $sum_r += $p->{runs}[$i]{len};
-        $k++;
-    }
-    return ([], 0, 1.0) if $k == 0 || $sum_r == 0;
-
-    my $s = $sum_o / $sum_r;
-    $s = ($s < $smin) ? $smin : ($s > $smax ? $smax : $s);
-
-    my @perrun;
-    for my $i (0..$k-1) {
-        my $sym = $p->{runs}[$i]{sym};
-        my $rlen_scaled = max(1, int($p->{runs}[$i]{len} * $s + 0.5));
-        my $olen = $obs_runs->[$i]{len};
-        my $tol = $p->{elasticity}{$sym} // 0;
-
-        my $pen;
-        if ($p->{terminal} && $i == $k-1 && $sym eq $virtual_sym) {
-            $pen = 0;
-        } else {
-            my $diff = abs($olen - $rlen_scaled);
-            $pen = ($diff > $tol) ? ($diff - $tol) : 0;
-        }
-
-        push @perrun, { sym => $sym, r => $rlen_scaled, o => $olen, tol => $tol, pen => $pen };
-    }
-
-    return (\@perrun, $k, $s);
-}
-
-sub _score_from_err_den {
-    my ($err, $den) = @_;
-    $den = max(1, $den);
-    my $score = $den / ($den + $err);   # in (0,1], higher is better
-    return $score;
-}
-
-# -------------------------------------------------------------------
-# Pattern utilities
-# -------------------------------------------------------------------
-
-# Normalize pattern & extract flags.
-# Returns ($canonical_string, $terminal_flag, $continues_flag)
-sub _canonicalize_pattern {
-    my ($p) = @_;
-    $p //= '';
-    $p =~ s/\s+//g;
-
-    my $continues = ($p =~ s/>$//) ? 1 : 0;   # advisory hint
-    my $terminal  = ($p =~ s/\)$//) ? 1 : 0;  # ignore penalty on last run if it is virtual tail
-
-    $p =~ s/\+//g;   # drop long markers
-    $p =~ s/-/./g;   # medium press → dot
-    $p =~ s/[^.~]//g;
-
-    return ($p, $terminal, $continues);
-}
-
-sub _runs_from_pattern {
-    my ($p) = @_;
-    return [] unless length $p;
-    my @runs;
-    while ($p =~ /([.~])\1*/g) {
-        my $tok = $&;
-        push @runs, { sym => substr($tok,0,1), len => length($tok) };
-    }
-    return \@runs;
-}
-
-sub _runs_prefix {
-    my ($A, $B) = @_;
-    return 0 unless @$A < @$B;
-    for my $i (0..$#$A) {
-        return 0 if $A->[$i]{sym} ne $B->[$i]{sym};
-    }
-    return 1;
-}
-
-# -------------------------------------------------------------------
-# VIS helpers (colors, backgrounds, abbreviated renderings)
-# -------------------------------------------------------------------
-
-sub _ansi_rgb   { return sprintf("\e[38;2;%d;%d;%dm", $_[0], $_[1], $_[2]); }
-sub _ansi_bg    { return sprintf("\e[48;2;%d;%d;%dm", $_[0], $_[1], $_[2]); } # a24bg(R,G,B)
-sub _ansi_reset { return "\e[0m"; }
-my $_ansi_reset="\e[0m";
-
-# pen==0 → near-white; higher pen → darker base color
-sub _fg_for_pen {
-    my ($sym, $pen) = @_;
-    my $alpha = 1.0 / (1.0 + $pen);   # in (0,1]
-    my ($r1,$g1,$b1,$r2,$g2,$b2);
-    if ($sym eq '.') {        # green-ish
-        ($r1,$g1,$b1) = (220,255,220); # good
-        ($r2,$g2,$b2) = (0,80,0);      # bad
-    } else {                   # '~' blue-ish
-        ($r1,$g1,$b1) = (220,220,255);
-        ($r2,$g2,$b2) = (0,0,120);
-    }
-    my $r = int($r2 + ($r1 - $r2) * $alpha + 0.5);
-    my $g = int($g2 + ($g1 - $g2) * $alpha + 0.5);
-    my $b = int($b2 + ($b1 - $b2) * $alpha + 0.5);
-    return _ansi_rgb($r,$g,$b);
-}
-
-# VIS:viz_runs_abbrev — render runs using base bg + symbol fg, truncated
-sub _viz_runs_abbrev {
-    my ($runs, $scale, $symbols, $bg, $max_chars) = @_;
-    my $s = $bg;
-    my $count = 0;
-    for my $r (@$runs) {
-        my $ch = $symbols->{$r->{sym}} // $r->{sym};
-        my $n  = max(1, int($r->{len} * $scale + 0.5));
-        for (my $i=0; $i<$n; $i++) {
-            last if $count >= $max_chars;
-            $s .= _fg_for_pen($r->{sym}, 0) . $ch;
-            $count++;
-        }
-        last if $count >= $max_chars;
-    }
-    $s .= "…" if _render_len_chars($runs, $scale) > $max_chars;
-    return $s . _ansi_reset();
-}
-
-sub _render_len_chars {
-    my ($runs, $scale) = @_;
-    my $tot = 0;
-    for my $r (@$runs) {
-        $tot += max(1, int($r->{len} * $scale + 0.5));
-    }
-    return $tot;
-}
-
-# VIS:viz_full_candidate_line — per-run colored by penalty; scaled to viz_scale, on pattern bg
-sub _viz_full_candidate_line {
-    my ($self, $perrun, $p_runs) = @_;
-    my $scale   = $self->{viz_scale};
-    my $symbols = $self->{viz_symbols};
-    my $colored = $self->{_viz_pat_bg};
-
-    for my $i (0..$#$perrun) {
-        my ($sym, $pen) = @{$perrun->[$i]}{qw(sym pen)};
-        my $nchars = max(1, int($p_runs->[$i]{len} * $scale + 0.5));
-        my $ch = $symbols->{$sym} // $sym;
-        my $seg = ($ch x $nchars);
-        my $fg  = $self->{viz_show_colors} ? _fg_for_pen($sym, $pen) : '';
-        $colored .= $fg . $seg;
-    }
-    return $colored . _ansi_reset();
-}
-
-# VIS:viz_pattern_str — render full pattern (no penalty info), colored by symbol type
-sub _viz_pattern_str {
-    my ($self, $runs, $is_user) = @_;
-    my $scale   = $self->{viz_scale};
-    my $symbols = $self->{viz_symbols};
-    my $bg      = $is_user ? $self->{_viz_user_bg} : $self->{_viz_pat_bg};
-    my $s = $bg;
-    for my $r (@$runs) {
-        my $n  = max(1, int($r->{len} * $scale + 0.5));
-        my $ch = $symbols->{$r->{sym}} // $r->{sym};
-        my $fg = $self->{viz_show_colors} ? _fg_for_pen($r->{sym}, 0) : '';
-        $s .= $fg . ($ch x $n);
-    }
-    return $s . _ansi_reset();
-}
-
-# Abbreviated pattern string (no penalty), for one-line 'pat="..."'
-sub _viz_pattern_abbrev {
-    my ($self, $runs) = @_;
-    return _viz_runs_abbrev($runs, $self->{viz_scale}, $self->{viz_symbols}, $self->{_viz_pat_bg}, $self->{viz_abbrev_max});
-}
-
-# VIS: per-run colored abbreviated 'pat="..."' using measured penalties for prefix, dim remainder.
-sub _viz_pattern_abbrev_perrun {
-    my ($self, $perrun, $p_runs, $s, $k) = @_;
-    my $scale   = $self->{viz_scale};
-    my $symbols = $self->{viz_symbols};
-    my $maxc    = $self->{viz_abbrev_max};
-    my $out     = $self->{_viz_pat_bg};
-    my $count   = 0;
-
-    # prefix: perrun colored
-    for my $i (0..$k-1) {
-        my ($sym, $r, $pen) = @{$perrun->[$i]}{qw(sym r pen)};
-        my $nchars = max(1, int($p_runs->[$i]{len} * $scale + 0.5));
-        my $ch = $symbols->{$sym} // $sym;
-        my $fg = $self->{viz_show_colors} ? _fg_for_pen($sym, $pen) : '';
-        for (my $j=0; $j<$nchars && $count<$maxc; $j++) {
-            $out .= $fg . $ch;
-            $count++;
-        }
-        last if $count >= $maxc;
-    }
-
-    # remainder: dim (no observation yet)
-    for my $i ($k..$#$p_runs) {
-        my $sym = $p_runs->[$i]{sym};
-        my $rlen_scaled = max(1, int($p_runs->[$i]{len} * $scale + 0.5));
-        my $ch = $symbols->{$sym} // $sym;
-        my $fg = $self->{viz_show_colors} ? _fg_for_pen($sym, 999) : '';  # very dark
-        for (my $j=0; $j<$rlen_scaled && $count<$maxc; $j++) {
-            $out .= $fg . $ch;
-            $count++;
-        }
-        last if $count >= $maxc;
-    }
-
-    $out .= "…" if $count >= $maxc;
-    return $out . _ansi_reset();
-}
-
-# VIS: full pattern line with per-run penalties for prefix, dim remainder.
-sub _viz_full_from_perrun {
-    my ($self, $perrun, $p_runs, $s, $k) = @_;
-    my $scale   = $self->{viz_scale};
-    my $symbols = $self->{viz_symbols};
-    my $out     = $self->{_viz_pat_bg};
-
-    for my $i (0..$k-1) {
-        my ($sym, $r, $pen) = @{$perrun->[$i]}{qw(sym r pen)};
-        my $nchars = max(1, int($p_runs->[$i]{len} * $scale + 0.5));
-        my $ch = $symbols->{$sym} // $sym;
-        my $fg = $self->{viz_show_colors} ? _fg_for_pen($sym, 999) : '';
-        $out .= $fg . ($ch x $nchars);
-    }
-    for my $i ($k..$#$p_runs) {
-        my $sym = $p_runs->[$i]{sym};
-        my $rlen_scaled = max(1, int($p_runs->[$i]{len} * $s + 0.5));
-        my $ch = $symbols->{$sym} // $sym;
-        my $fg = $self->{viz_show_colors} ? _fg_for_pen($sym, 999) : '';
-        $out .= $fg . ($ch x max(1, int($rlen_scaled * $scale + 0.5)));
-    }
-    return $out . _ansi_reset();
-}
-
-# -------------------------------------------------------------------
-# DEBUG helpers (verbose >= 2)
-# -------------------------------------------------------------------
-
-sub _runs_to_string_scaled {
-    my ($runs, $scale, $symbols) = @_;
-    my $s = '';
-    for my $r (@$runs) {
-        my $ch = $symbols->{$r->{sym}} // $r->{sym};
-        my $n  = max(1, int($r->{len} * $scale + 0.5));
-        $n = 120 if $n > 120; # cap
-        $s .= ($ch x $n);
-    }
-    return $s;
-}
-
+# -----------------------------------------------------------------------------
+# Visualization (kept minimal; hooks preserved)
+# -----------------------------------------------------------------------------
 sub _debug_dump_observation {
     my ($self, $obs_runs, $dt) = @_;
-    return unless $self->{viz_enable};
-    my $qms = int($self->{quantum_s} * 1000 + 0.5);
-    my $len_q = 0; $len_q += $_->{len} for @$obs_runs;
-    my $len_ms = $len_q * $qms;
-    my $sym = _runs_to_string_scaled($obs_runs, $self->{viz_scale}, $self->{viz_symbols});
-    printf "[t=+%.03fs] OBS q=%dms len=%dq (~%dms)  \"%s\"\n",
-        $dt, $qms, $len_q, $len_ms, $sym;
+    my $q = $self->{quantum_ms};
+    my $s = '';
+    for my $r (@$obs_runs) { $s .= ($r->{sym} x max(1, $r->{len})); }
+    printf("[t=+%.03fs] OBS q=%dms len=%dq (~%dms)  \"%s\"\n",
+           $dt, $q, scalar(@$obs_runs),
+           int(sum(map { $_->{len} } @$obs_runs) * $self->{quantum_ms}), $s);
 }
 
 sub _debug_dump_candidates {
-    my ($self, $obs_runs, $full_list, $best_ub, $dt) = @_;
-
-    printf "[t=+%.03fs] CAND full_best=%.3f ub_best=%.3f\n",
-        $dt, $full_list->[0]{score}, $best_ub;
-
-    # VIS: one-line user abbreviated line (usr="...") with user bg
-    if ($self->{viz_enable}) {
-        my $usr_abbrev = _viz_runs_abbrev($obs_runs, $self->{viz_scale}, $self->{viz_symbols}, $self->{_viz_user_bg}, $self->{viz_abbrev_max});
-        printf "                                                       $$self{_viz_user_bg}usr=\"%s\"$_ansi_reset\n", $usr_abbrev;
-    }
-
-    my $smin = $self->{stretch_min};
-    my $smax = $self->{stretch_max};
-
-    # Show ALL patterns: FULL (scored), UB (upper bound), or X (impossible)
-    for my $idx (0..$#{$self->{patterns}}) {
-        my $p = $self->{patterns}[$idx];
-        my $name = $p->{name};
-        my $status;
-        my $val = 0.0;
-        my $viz  = '';
-        my $pat_abbrev = '';
-
-        if (@$obs_runs < @{$p->{runs}}) {
-            $status = 'UB';
-            $val = $self->_prefix_upperbound($obs_runs, $p, $smin, $smax) * $p->{w_eff};
-
-            if ($self->{viz_enable}) {
-                my ($perrun_pref, $k, $s) = _perrun_prefix_alignment($obs_runs, $p, $obs_runs->[-1]{sym}, $smin, $smax);
-                $pat_abbrev = $self->_viz_pattern_abbrev_perrun($perrun_pref, $p->{runs}, $s, $k);
-                if ($self->{viz_pats_full}) {
-                    my $pf = $self->_viz_full_from_perrun($perrun_pref, $p->{runs}, $s, $k);
-                    $viz = $pf;
-                }
-            }
-        } else {
-            my ($sc, $s, $perrun) = $self->_full_score($obs_runs, $p, $obs_runs->[-1]{sym}, $smin, $smax);
-
-            if ($sc > 0) {
-                $status = 'FULL';
-                $val = $sc * $p->{w_eff};
-                if ($self->{viz_enable}) {
-                    $pat_abbrev = $self->_viz_pattern_abbrev_perrun($perrun, $p->{runs}, $s, scalar(@$perrun));
-                    $viz = $self->{viz_pats_full} ? $self->_viz_full_candidate_line($perrun, $p->{runs}) : '';
-                }
-            } else {
-                $status = 'X';
-                $val = 0;
-                if ($self->{viz_enable}) {
-                    # attempt prefix coloring if any prefix aligns; else neutral
-                    my ($perrun_pref, $k, $s) = _perrun_prefix_alignment($obs_runs, $p, $obs_runs->[-1]{sym}, $smin, $smax);
-                    if ($k > 0) {
-                        $pat_abbrev = $self->_viz_pattern_abbrev_perrun($perrun_pref, $p->{runs}, $s, $k);
-                        $viz = $self->{viz_pats_full} ? $self->_viz_full_from_perrun($perrun_pref, $p->{runs}, $s, $k) : '';
-                    } else {
-                        $pat_abbrev = $self->_viz_pattern_abbrev($p->{runs});
-                        $viz = $self->{viz_pats_full} ? $self->_viz_pattern_str($p->{runs}, 0) : '';
-                    }
-                }
-            }
-        }
-
-        if ($self->{viz_enable}) {
-            my $line = sprintf("  %-14s  %-5s  score=%.3f  w=%.2f eff=%.2f  pat=\"%s\"",
-                               $name, $status, $val, $p->{weight}, $p->{w_eff}, $pat_abbrev);
-            print $line, "\n";
-            if ($viz) {
-                print "    ", $viz, "\n";
-            }
-        } else {
-            my $pat_txt = _runs_to_string_scaled($p->{runs}, 1.0, { '.' => '.', '~' => '~' });
-            my $line = sprintf("  %-14s  %-5s  score=%.3f  w=%.2f eff=%.2f  pat=\"%s\"",
-                               $name, $status, $val, $p->{weight}, $p->{w_eff}, $pat_txt);
- 
-            print $line, "\n";
-        }
+    my ($self, $obs_runs, $full_ref, $best_ub_w, $dt) = @_;
+    my $usr = '';
+    for my $r (@$obs_runs) { $usr .= ($r->{sym} x max(1, $r->{len})); }
+    printf("%60s usr=\"%s\"\n", '', $usr);
+    for my $c (@$full_ref) {
+        my $p = $self->{patterns}[$c->{idx}];
+        my $pat = '';
+        for my $r (@{$p->{runs}}) { $pat .= ($r->{sym} x max(1, $r->{len})); }
+        printf("  %-14s FULL   score=%.3f  w=%.2f  pat=\"%s\"\n",
+               $c->{name}, $c->{score}, ($p->{weight}//1.0), $pat);
     }
 }
 
-
 1;
-

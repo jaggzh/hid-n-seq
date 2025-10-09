@@ -5,12 +5,12 @@ dot_ms: 20.000
 patterns:
   - id: click
     name: "Click"
-    visual: .......
+    visual: ....
     # visual_numeric: .{7.1}
     weight: 1.000
     description: "Click"
     runs:
-      0: { type: press, variance: 1.250, weight: 1.000, samples: 9 }
+      0: { type: press, variance: 3.750, weight: 1.000, samples: 9 }
   - id: doubleclick
     name: "doubleclick"
     visual: ......~~~~~~~~......
@@ -21,6 +21,22 @@ patterns:
       0: { type: press, variance: 1.397, weight: 1.000, samples: 9 }
       1: { type: release, variance: 2.152, weight: 1.000, samples: 9 }
       2: { type: press, variance: 1.215, weight: 1.000, samples: 9 }
+  - id: mediumpress
+    name: "mediumpress"
+    visual: ...........
+    # visual_numeric: .{44.1}
+    weight: 1.000
+    description: "Medium press"
+    runs:
+      0: { type: press, variance: 4.190, weight: 1.000, samples: 11 }
+  - id: longpress
+    name: "longpress"
+    visual: ............................................
+    # visual_numeric: .{44.1}
+    weight: 1.000
+    description: "Longpress"
+    runs:
+      0: { type: press, variance: 3.190, weight: 1.000, samples: 11 }
   # - id: click-gap-doubleclick
   #   name: "click-gap-doubleclick"
   #   visual: .......~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~........~~~~~~~~~.......
@@ -33,19 +49,3 @@ patterns:
   #     2: { type: press, variance: 4.688, weight: 1.000, samples: 12 }
   #     3: { type: release, variance: 3.161, weight: 1.000, samples: 12 }
   #     4: { type: press, variance: 0.700, weight: 1.000, samples: 12 }
-  - id: mediumpress
-    name: "mediumpress"
-    visual: ...........
-    # visual_numeric: .{44.1}
-    weight: 1.000
-    description: "Medium press"
-    runs:
-      0: { type: press, variance: 8.190, weight: 1.000, samples: 11 }
-  - id: longpress
-    name: "longpress"
-    visual: ............................................
-    # visual_numeric: .{44.1}
-    weight: 1.000
-    description: "Longpress"
-    runs:
-      0: { type: press, variance: 8.190, weight: 1.000, samples: 11 }

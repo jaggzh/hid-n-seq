@@ -47,7 +47,7 @@ sub main {
 		quantum_s  => $opt->quantum_s,
 		callback   => \&handle_gesture,
 		gestures   => $gestures,
-		commit_threshold   => 0.80,   # still require a strong match
+		commit_threshold   => 0.60,   # still require a strong match
 		commit_margin      => 0.18,   # need a bigger lead over any continuation
 		decision_timeout_s => 0.34,   # max patience window once a full candidate exists
 		wait_preference    => 0.60,   # prefer waiting if a longer pattern is plausible

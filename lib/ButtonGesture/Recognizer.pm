@@ -580,6 +580,24 @@ sub _viz_pattern_str {
     return $s . _ansi_reset();
 }
 
+# Facet helpers for labeling: USR and REL
+sub _facet_usr_label {
+    my ($self) = @_;
+    return 'USR:UNKNOWN' unless @{$self->{_events}};
+    my ($k, $t) = @{$self->{_events}[-1]};
+    return ($k && $k eq 'press') ? 'USR:PRESS' : 'USR:RELEASE';
+}
+
+sub _facet_rel_label {
+    my ($self, $obs_runs, $p, $is_done) = @_;
+    my $Lobs = scalar(@$obs_runs);
+    my $Lpat = $p->{runs_count} // scalar(@{$p->{runs}});
+    return 'REL:DONE'  if $is_done && $Lobs == $Lpat;
+    return 'REL:OVER'  if $is_done && $Lobs  > $Lpat;
+    return 'REL:LAST'  if $Lobs >= $Lpat;                    # in final run but not done
+    return sprintf('REL:PART %d/%d', $Lobs, $Lpat);          # prefix coverage only
+}
+
 # abbreviated pattern for pat="...": prefix colored by per-run penalty; remainder dim
 sub _viz_pattern_abbrev_perrun {
     my ($self, $perrun, $p_runs, $k) = @_;
@@ -652,19 +670,22 @@ sub _debug_dump_candidates {
     my $usr = $self->_viz_pattern_str($obs_runs, 1);
     printf("%44s usr=\"%s\"\n", '', $usr);
 
+    my $usr_label = $self->_facet_usr_label();
+
     my %seen_full = map { $self->{patterns}[ $_->{idx} ]{name} // $_->{idx} => 1 } @$full_ref;
 
-    # FULL rows: per-run colored, no suffix
+    # FULL-ish rows (prefix-covered): print REL facet instead of the old "FULL"
     for my $c (@$full_ref) {
         my $p = $self->{patterns}[$c->{idx}];
+        my $rel = $self->_facet_rel_label($obs_runs, $p, $c->{is_done});
         my $k = $p->{runs_count};                              # FULL: obs >= pat
         my $per = $c->{perrun_info} // $c->{perrun};   # backward compatibility
         my $pat = $self->_viz_pattern_abbrev_perrun($per, $p->{runs}, $k);
-        printf("  %-14s FULL   score=%.3f  w=%.2f  pat=\"%s\"\n",
-               $c->{name}, $c->{score}, ($p->{weight}//1.0), $pat);
+        printf("  %-14s %-12s %s  score=%.3f  w=%.2f  pat=\"%s\"\n",
+               $c->{name}, $rel, $usr_label, $c->{score}, ($p->{weight}//1.0), $pat);
     }
 
-    # UB rows: strict supersequences of best prefix (prefix colored, suffix dim)
+    # UB rows: strict supersequences of observation prefix (prefix colored, suffix dim)
     for my $j (0 .. $#{$self->{patterns}}) {
         my $p = $self->{patterns}[$j];
         my $name = $p->{name} // $p->{id} // "pattern_$j";
@@ -676,8 +697,9 @@ sub _debug_dump_candidates {
         my $k    = scalar(@$obs_runs);
         my $per  = _sim_prefix_to_perrun($p, $sim_prefix);
         my $pat  = $self->_viz_pattern_abbrev_perrun($per, $p->{runs}, $k);
-        printf("  %-14s UB     score=%.3f  w=%.2f  pat=\"%s\"\n",
-               $name, $ub_w, ($p->{weight}//1.0), $pat);
+        my $rel  = sprintf('REL:PART %d/%d', $k, scalar(@{$p->{runs}}));
+        printf("  %-14s %-12s %s  PAT:OPEN BC=%.3f  w=%.2f  pat=\"%s\"\n",
+               $name, $rel, $usr_label, $ub_w, ($p->{weight}//1.0), $pat);
     }
 }
 

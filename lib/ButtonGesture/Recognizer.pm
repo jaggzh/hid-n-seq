@@ -341,7 +341,15 @@ sub _evaluate_if_ready {
     }
     # -------------------------------------------------------------------------
 
-    # Safety: hard-stops if nothing can be decided for too long
+    # Hopeless: no DONE ≥ threshold and all UBs (with patience) are below threshold → NO_MATCH
+    if (!($best_done_idx >= 0 && $best_done_score >= $threshold)) {
+        my $max_ub_pat = $best_ub_w * $patience;  # best_ub_w already weight-applied
+        if ($max_ub_pat < $threshold) {
+            $self->_no_match($t);
+            return;
+        }
+    }
+
     my $idle_s = defined($self->{_last_event_t}) ? ($t - $self->{_last_event_t}) : 0;
     my $span_s = defined($self->{_first_event_t}) ? ($t - $self->{_first_event_t}) : 0;
 
@@ -644,10 +652,9 @@ sub _viz_pattern_abbrev_perrun {
 sub _debug_dump_observation {
     my ($self, $obs_runs, $dt) = @_;
     my $q = $self->{quantum_ms};
-    my $s = $self->_viz_pattern_str($obs_runs, 1);
-    printf("[t=+%.03fs] OBS q=%dms len=%dq (~%dms)  \"%s\"\n",
+    printf("[t=+%.03fs] OBS q=%dms len=%dq (~%dms)\n",
            $dt, $q, scalar(@$obs_runs),
-           int(sum(map { $_->{len} } @$obs_runs) * $self->{quantum_ms}), $s);
+           int(sum(map { $_->{len} } @$obs_runs) * $self->{quantum_ms}));
 }
 
 

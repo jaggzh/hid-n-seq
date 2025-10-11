@@ -93,7 +93,7 @@ sub reset {
     $self->{_first_event_t} = undef;
     $self->{_last_event_t}  = undef;
     $self->{_last_debug_line} = undef;
-	$self->{_last_obs_key} = undef;
+    $self->{_last_obs_key} = undef;
     # clear per-pattern peak_done each fresh observation
     for my $p (@{$self->{patterns}}) { $p->{_peak_done} = 0.0; $p->{_ever_done} = 0; }
 }
@@ -248,12 +248,12 @@ sub _evaluate_if_ready {
         }
 
         # INVALIDATION: obs exceeds pattern length
-		# BUT: if pattern ends with press (dot), and obs is pattern+1 with final release, that's OK (it's the DONE signal)
-		my $pattern_ends_with_press = ($p->{runs}[-1]{sym} eq $self->{sym_press});
-		my $obs_is_just_release_after = (@$obs_runs == @{$p->{runs}} + 1 && 
-										  $obs_runs->[-1]{sym} eq $self->{sym_release});
+        # BUT: if pattern ends with press (dot), and obs is pattern+1 with final release, that's OK (it's the DONE signal)
+        my $pattern_ends_with_press = ($p->{runs}[-1]{sym} eq $self->{sym_press});
+        my $obs_is_just_release_after = (@$obs_runs == @{$p->{runs}} + 1 && 
+                                          $obs_runs->[-1]{sym} eq $self->{sym_release});
 
-		if (@$obs_runs > @{$p->{runs}} && !($pattern_ends_with_press && $obs_is_just_release_after)) {
+        if (@$obs_runs > @{$p->{runs}} && !($pattern_ends_with_press && $obs_is_just_release_after)) {
 
             # Add to @full for viz, but mark as invalidated
             push @full, {
@@ -419,51 +419,51 @@ sub _evaluate_if_ready {
                    $ub_competitors, $patience);
         }
 
-		if (1) {
-			# (B) NEW: Superset hold — if any strict superset of best_done is still viable and high, defer commit
-			my $hold_th   = defined($self->{hold_ub_threshold}) ? $self->{hold_ub_threshold} : $threshold;
-			my $hold_max  = 0.0;
-			my $p_best    = $self->{patterns}[$best_done_idx];
+        if (1) {
+            # (B) NEW: Superset hold — if any strict superset of best_done is still viable and high, defer commit
+            my $hold_th   = defined($self->{hold_ub_threshold}) ? $self->{hold_ub_threshold} : $threshold;
+            my $hold_max  = 0.0;
+            my $p_best    = $self->{patterns}[$best_done_idx];
 
-			for my $j (0 .. $#{$self->{patterns}}) {
-				next if $j == $best_done_idx;
-				my $q = $self->{patterns}[$j];
-				
-				# INVALIDATION: Skip if obs exceeds this pattern
-				next if @$obs_runs > @{$q->{runs}};
-				
-				next unless _is_strict_superset($q, $p_best);
+            for my $j (0 .. $#{$self->{patterns}}) {
+                next if $j == $best_done_idx;
+                my $q = $self->{patterns}[$j];
+                
+                # INVALIDATION: Skip if obs exceeds this pattern
+                next if @$obs_runs > @{$q->{runs}};
+                
+                next unless _is_strict_superset($q, $p_best);
 
-				my $val = 0.0;
-				if (@$obs_runs < @{$q->{runs}}) {
-					my ($ub_raw_j, undef) = _prefix_ub_with_perrun($obs_runs, $q);
-					
-					# INVALIDATION by UB: If UB below threshold, pattern has failed
-					next if $ub_raw_j < $threshold;
-					
-					$val = $ub_raw_j * ($q->{weight} // 1.0);
-				} else {
-					# If already FULL for q, use its current weighted score (or recompute) as a conservative competitor
-					my ($full_q) = grep { $_->{idx} == $j } @full;
-					if ($full_q && !$full_q->{invalidated}) {
-						$val = $full_q->{score};
-					} else {
-						my ($raw_q, undef) = _full_score_variance($obs_runs, $q);
-						$val = $raw_q * ($q->{weight} // 1.0);
-					}
-				}
-				$val *= $patience;
-				$hold_max = $val if $val > $hold_max;
-			}
+                my $val = 0.0;
+                if (@$obs_runs < @{$q->{runs}}) {
+                    my ($ub_raw_j, undef) = _prefix_ub_with_perrun($obs_runs, $q);
+                    
+                    # INVALIDATION by UB: If UB below threshold, pattern has failed
+                    next if $ub_raw_j < $threshold;
+                    
+                    $val = $ub_raw_j * ($q->{weight} // 1.0);
+                } else {
+                    # If already FULL for q, use its current weighted score (or recompute) as a conservative competitor
+                    my ($full_q) = grep { $_->{idx} == $j } @full;
+                    if ($full_q && !$full_q->{invalidated}) {
+                        $val = $full_q->{score};
+                    } else {
+                        my ($raw_q, undef) = _full_score_variance($obs_runs, $q);
+                        $val = $raw_q * ($q->{weight} // 1.0);
+                    }
+                }
+                $val *= $patience;
+                $hold_max = $val if $val > $hold_max;
+            }
 
-			if ($self->{verbose} >= 2) {
-				printf("[DEBUG] superset hold_max=%.3f hold_th=%.3f (blocking=%s)\n",
-					   $hold_max, $hold_th, ($hold_max >= $hold_th ? "YES" : "NO"));
-			}
+            if ($self->{verbose} >= 2) {
+                printf("[DEBUG] superset hold_max=%.3f hold_th=%.3f (blocking=%s)\n",
+                       $hold_max, $hold_th, ($hold_max >= $hold_th ? "YES" : "NO"));
+            }
 
-			# If a strict superset still has enough headroom, wait.
-			return if $hold_max >= $hold_th;
-		}
+            # If a strict superset still has enough headroom, wait.
+            return if $hold_max >= $hold_th;
+        }
 
         if ($self->{verbose} >= 2) {
             printf("[DEBUG] Final check: %.3f >= %.3f + %.3f? (%s)\n",
@@ -483,10 +483,37 @@ sub _evaluate_if_ready {
     my $idle_s = defined($self->{_last_event_t}) ? ($t - $self->{_last_event_t}) : 0;
     my $span_s = defined($self->{_first_event_t}) ? ($t - $self->{_first_event_t}) : 0;
 
+    # Smart idle timeout: don't timeout during an active press if a dot-ended pattern is viable
+    my $has_viable_dot_pattern = 0;
     if ($self->{hard_stop_idle_s} && $idle_s >= $self->{hard_stop_idle_s}) {
-        $self->_no_match($t);
-        return;
+        # Check if we're currently in a press and any dot-ended pattern is still viable
+        if (@{$self->{_events}} > 0) {
+            my ($last_kind, $last_t) = @{$self->{_events}[-1]};
+            if ($last_kind eq 'press') {
+                # We're actively pressing - check if any dot-ended patterns are viable
+                for my $c (@full) {
+                    next if $c->{invalidated};
+                    my $p = $self->{patterns}[$c->{idx}];
+                    next if @$obs_runs > @{$p->{runs}};  # Skip exceeded patterns
+                    
+                    # Check if pattern ends with press and has viable score/UB
+                    if (($p->{runs}[-1]{sym} // '') eq $self->{sym_press}) {
+                        if ($c->{score} >= $threshold || $c->{is_done}) {
+                            $has_viable_dot_pattern = 1;
+                            last;
+                        }
+                    }
+                }
+            }
+        }
+        
+        # Only timeout if no viable dot patterns during active press
+        if (!$has_viable_dot_pattern) {
+            $self->_no_match($t);
+            return;
+        }
     }
+    
     if ($self->{hard_stop_span_s} && $span_s >= $self->{hard_stop_span_s}) {
         $self->_no_match($t);
         return;
@@ -512,6 +539,12 @@ sub _full_score_variance {
     for my $i (0..$L-1) {
         my $r  = $pruns->[$i];
         my $or = $obs_runs->[$i];
+        
+        # CRITICAL: Symbol mismatch means zero score
+        if (($r->{sym} // '') ne ($or->{sym} // '')) {
+            return (0.0, []);
+        }
+        
         my $mu = 0.0 + ($r->{len}      // 1);
         my $sd = 0.0 + ($r->{variance} // 1.0);
         my $w  = 0.0 + ($r->{weight}   // 1.0);
@@ -525,13 +558,13 @@ sub _full_score_variance {
     }
     my $raw = ($w_sum>0 ? $acc/$w_sum : 0.0);
     # my $edges_total = ($L > 1) ? ($L - 1) : 1;
-	# say "DEBUG: Pattern=$p->{name} raw_before_edge=$raw edges_total=$edges_total" if $p->{name} eq 'click';
+    # say "DEBUG: Pattern=$p->{name} raw_before_edge=$raw edges_total=$edges_total" if $p->{name} eq 'click';
 
 
     # transition (edge) bonus — more observed edges ⇒ slightly higher raw
     my $ew = $p->{_edge_bonus_weight} // 0.0;
     if ($ew > 0) {
-		my $edges_total = ($L > 1) ? ($L - 1) : 1;
+        my $edges_total = ($L > 1) ? ($L - 1) : 1;
         my $edges_have  = max(0, min($edges_total, scalar(@$obs_runs) - 1));
         my $edge_frac   = ($edges_total > 0) ? ($edges_have / $edges_total) : 1.0;
         $raw *= (1.0 + $ew * $edge_frac);

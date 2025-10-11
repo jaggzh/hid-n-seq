@@ -1,0 +1,318 @@
+#!/usr/bin/perl
+BEGIN { if (grep {/--debug/} @ARGV) { my @ARGS=grep {!/--debug/} @ARGV; exec($^X, "-d", __FILE__, @ARGS); } }
+use v5.36;
+use lib '.';
+use Time::HiRes qw(time usleep);
+use FindBin;
+use lib "$FindBin::Bin/lib";
+use ButtonGesture::Recognizer;
+use Getopt::Long::Descriptive;
+use YAML::XS qw(LoadFile);
+use IO::Socket::INET;
+use IO::Select;
+
+my $def_file = "wifi-gestures.yaml";
+my $def_quantum_s = 0.02;
+my $def_port = 10102;
+my $verbose = 3;
+my $_ansi_matched = "\033[32;1m";
+my $_ansi_score = "\033[33;1m";
+my $_ansi_reset = "\033[0m";
+
+# Global state for cleanup
+my ($mouse_enabled, $server, $recognizer);
+
+sub main {
+    my $patterns = [];
+    my $file_dot_ms;
+    my $usage_desc = "%c %o";
+    my ($opt, $usage) = describe_options(
+        $usage_desc,
+        [ 'gesture-file|f=s' => "Gesture file .yaml",
+            { 'default' => $def_file, } ],
+        [ 'net|N'           => "Use network mode instead of mouse" ],
+        [ 'port|p=i'        => "Listen port ($def_port) (implies -N)", {
+            default => $def_port,
+            implies => 'net'
+        }],
+        [ 'quantum-s|q=f'    => "Smallest resolution of sensing durations (seconds, float ($def_quantum_s)",
+            { 'default' => $def_quantum_s, } ],
+        [ 'verbose|v+'  => "Increase verbosity each time -v is used",
+            { 'default' => $verbose, } ],
+        [],
+        [ 'help|h'      => "Show this help", { shortcircuit => 1 } ],
+    );
+    print($usage->text), exit if $opt->help;
+    
+    $verbose = $opt->verbose;
+    my $use_net = $opt->net;
+    my $port = $opt->port;
+    
+    if ($opt->gesture_file) {
+        die "No such YAML: " . $opt->gesture_file . "\n"
+            unless -f $opt->gesture_file;
+        my $raw = LoadFile($opt->gesture_file);
+        $file_dot_ms = (ref($raw) eq 'HASH' && exists $raw->{dot_ms}) ? 0.0 + $raw->{dot_ms} : undef;
+        my $in = ref($raw) eq 'HASH' ? ($raw->{patterns} // $raw->{gestures} // []) : $raw;
+        $patterns = _normalize_patterns($in, '.', '~');   # parse visual (incl. {dots}) → runs[len], merge variance/weight
+    }
+    
+    my $quantum_s = defined($file_dot_ms) ? ($file_dot_ms / 1000.0) : $opt->quantum_s;
+    $recognizer = Recognizer->new(
+        verbose    => $verbose,
+        quantum_ms => int($quantum_s * 1000 + 0.5),
+        callback   => \&handle_gesture,
+        patterns   => $patterns,
+        commit_threshold   => 0.45,   # still require a strong match
+        commit_margin      => 0.018,   # need a bigger lead over any continuation
+        decision_timeout_s => 0.34,   # max patience window once a full candidate exists
+        #viz_pats_full      => 0,
+        prefer_longer_margin => 0.15,   # promotes .~.~ over .~ when close
+        #commit_threshold     => 0.80,
+        #commit_margin        => 0.18,
+        #run_weight_dot   => 1.8,
+        #run_weight_tilde => 1.0,
+        #press_bias       => 0.35,
+        tie_epsilon      => 0.03,
+        # patience tunes how much weight UBs of non-best candidates get (1.0 = neutral)
+        patience           => 1.20,
+        # safety net timeouts; keep or tweak later
+        hard_stop_idle_s   => 1.00,
+        hard_stop_span_s   => 0.00,
+        # keep dot-end guard unless you know you want to commit while still pressed
+        require_release_for_dot_end => 1,
+    );
+    
+    my $idle_tick_s = $quantum_s;
+    my $last_feed   = time();
+    
+    # Mode-specific setup
+    my ($sel_net, $client);
+    
+    if ($use_net) {
+        # Network mode
+        $server = IO::Socket::INET->new(
+            LocalPort => $port,
+            Proto     => 'tcp',
+            Listen    => 5,
+            Reuse     => 1,
+        ) or die "Cannot create socket on port $port: $!\n";
+        $sel_net = IO::Select->new($server);
+        
+        print "=" x 60 . "\n";
+        print "Gesture Recognizer (Network Mode)\n";
+        print "=" x 60 . "\n";
+        print "Listening on port: $port\n";
+    } else {
+        # Mouse mode
+        require Term::ReadKey;
+        Term::ReadKey::ReadMode('cbreak');
+        print "\e[?1000;1003;1006h";  # enable full mouse tracking
+        $mouse_enabled = 1;
+        
+        # Clear screen and show instructions
+        print "\e[2J\e[H";  # Clear screen and move to top
+        print "=" x 60 . "\n";
+        print "Mouse Gesture Recognizer Test\n";
+        print "=" x 60 . "\n";
+    }
+    
+    # Common display
+    print "Available gestures:\n";
+    print "  - click: Quick click\n";
+    print "  - doubleclick: Two quick clicks\n";
+    print "  - longpress: Hold for a second\n";
+    print "  - 'menu': click .. click-click (intended for a menu but it's just a name).\n";
+    print "  - (not in my-gestures.yaml): Press-Tap: Long press, release, then tap\n";
+    print "\n";
+    
+    if ($use_net) {
+        print "Waiting for network connection. Press Ctrl-C to quit.\n";
+    } else {
+        print "Left-click anywhere to test gestures. Press Ctrl-C or 'q' to quit.\n";
+    }
+    print "-" x 60 . "\n\n";
+    
+    # Setup signal handler for clean exit
+    $SIG{INT} = sub { cleanup() };
+    
+    my $last_update = time();
+    while (1) {
+        if ($use_net) {
+            # Network mode
+            my @ready = $sel_net->can_read(0.001);
+            
+            foreach my $fh (@ready) {
+                if ($fh == $server) {
+                    # New connection
+                    $client = $server->accept();
+                    $sel_net->add($client);
+                    print "Client connected from ", $client->peerhost(), "\n";
+                } else {
+                    # Data from client
+                    my $line = <$fh>;
+                    if (!defined $line) {
+                        # Client disconnected
+                        print "Client disconnected\n";
+                        $sel_net->remove($fh);
+                        $fh->close();
+                        $client = undef if $fh == $client;
+                        next;
+                    }
+                    
+                    chomp($line);
+                    $line =~ s/\r//g;
+                    $line =~ s/^\s+|\s+$//g;
+                    
+                    # Parse pat-press or pat-release
+                    if ($line =~ /^pat-press/) {
+                        $recognizer->press(time());
+                        $last_feed = time();
+                    } elsif ($line =~ /^pat-release/) {
+                        $recognizer->release(time());
+                        $last_feed = time();
+                    }
+                }
+            }
+        } else {
+            # Mouse mode
+            my $c = Term::ReadKey::ReadKey(-1);
+            if (defined $c) {
+                if ($c eq "q") {
+                    say "QUIT\n";
+                    last;
+                } elsif ($c eq "\n") {
+                    print "\n" x 50;
+                } elsif ($c eq "\e") {
+                    my $seq = $c;
+                    my $next;
+                    while (defined($next = Term::ReadKey::ReadKey(-1))) {
+                        $seq .= $next;
+                        last if $next =~ /[A-Za-z~]$/;
+                    }
+                    if ($seq =~ /\e\[<(\d+);(\d+);(\d+)([Mm])/) {
+                        my ($btn, $x, $y, $state) = ($1, $2, $3, $4);
+                        if ($btn == 0) {
+                            if ($state eq 'M') {
+                                $recognizer->press(time());
+                            } else {
+                                $recognizer->release(time());
+                            }
+                            $last_feed = time();
+                        }
+                    } else {
+                        last if $next =~ /[A-Za-z~]$/;
+                    }
+                }
+            }
+        }
+        
+        if (time() - $last_feed >= $idle_tick_s) {
+            $recognizer->tick(time());
+            $last_feed = time();
+        }
+        
+        usleep(1000);
+    }
+}
+
+sub handle_gesture {
+    my ($gesture_name, $score, $meta) = @_;
+    my $when = ($meta && exists $meta->{t_end}) ? $meta->{t_end} : time();
+    if ($gesture_name && $gesture_name eq 'NO_MATCH') {
+        print "\nNo match (reset)\n";
+        print "at: $when  ---  ";
+    } else {
+        my $score_s = defined($score) ? sprintf('%.3f',$score) : '—';
+        print "\nMatched: $_ansi_matched$gesture_name$_ansi_reset  score=$_ansi_score$score_s$_ansi_reset\n";
+        print "at: $when  ---  ";
+    }
+    print "(q) or Ctrl-C to quit\n";
+}
+
+sub cleanup {
+    if ($mouse_enabled) {
+        print "\e[?1000;1003;1006l";  # disable mouse tracking
+        Term::ReadKey::ReadMode('restore');
+        print "\nMouse tracking disabled. Exiting.\n";
+    }
+    if ($server) {
+        $server->close();
+        print "\nServer closed. Exiting.\n";
+    }
+    exit;
+}
+
+END {
+    cleanup()
+}
+
+# --- helpers: parse visual (including .{N}/~{N}) and merge per-run metadata ----
+sub _normalize_patterns ($list, $sym_press, $sym_release) {
+    my @out;
+    for my $p (@$list) {
+        my @runs = ();
+        if (defined $p->{visual} && length $p->{visual}) {
+            @runs = _parse_visual_to_runs($p->{visual}, $sym_press, $sym_release);
+        }
+        # Merge per-run metadata (variance/weight) if provided
+        if (exists $p->{runs}) {
+            my @meta = map { $p->{runs}{$_} } sort { $a <=> $b } keys %{$p->{runs}};
+            for my $i (0 .. $#runs) {
+                my $m = $meta[$i] // {};
+                $runs[$i]{variance} = exists $m->{variance} ? 0.0 + $m->{variance}
+                                   : ($runs[$i]{type} eq 'release' ? 2.0 : 1.0);
+                $runs[$i]{weight}   = exists $m->{weight}   ? 0.0 + $m->{weight}   : 1.0;
+            }
+        } else {
+            for my $r (@runs) {
+                $r->{variance} //= ($r->{type} eq 'release' ? 2.0 : 1.0);
+                $r->{weight}   //= 1.0;
+            }
+        }
+        push @out, {
+            id      => $p->{id}   // $p->{name} // 'pattern',
+            name    => $p->{name} // $p->{id}   // 'pattern',
+            weight  => (defined $p->{weight} ? 0.0 + $p->{weight} : 1.0),
+            runs    => \@runs,
+        };
+    }
+    return \@out;
+}
+
+sub _parse_visual_to_runs ($visual, $sym_press, $sym_release) {
+    my @runs;
+    my @chars = split //, $visual;
+    my $i = 0;
+    while ($i <= $#chars) {
+        my $ch = $chars[$i];
+        if ($ch eq $sym_press || $ch eq $sym_release) {
+            my $type = ($ch eq $sym_release) ? 'release' : 'press';
+            # check for brace-form immediately after
+            if ($i+1 <= $#chars && $chars[$i+1] eq '{') {
+                # parse {number}
+                my $j = $i+2; my $num = '';
+                while ($j <= $#chars && $chars[$j] ne '}') { $num .= $chars[$j]; $j++; }
+                if ($j <= $#chars && $chars[$j] eq '}') {
+                    my $dots = 0.0 + $num;
+                    push @runs, { sym=>$ch, type=>$type, len=>$dots };
+                    $i = $j + 1;
+                    next;
+                }
+                # malformed; fall through to counting
+            }
+            # count raw glyph run
+            my $count = 1;
+            my $k = $i+1;
+            while ($k <= $#chars && $chars[$k] eq $ch) { $count++; $k++; }
+            push @runs, { sym=>$ch, type=>$type, len=>$count };
+            $i = $k;
+            next;
+        }
+        # skip any other chars/spaces
+        $i++;
+    }
+    return @runs;
+}
+
+main();

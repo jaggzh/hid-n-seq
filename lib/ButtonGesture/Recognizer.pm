@@ -445,7 +445,8 @@ sub _prefix_ub_with_perrun {
     my $w_sum = 0.0; my $acc = 0.0;
     my @sim_prefix;
 
-    # prefix: score observed runs against q's runs
+    # prefix: score observed runs against q's runs (current run uses best-from-now)
+    my $g = 1.0;  # salvageability of current run (gates suffix)
     for my $i (0..$K-1) {
         my $r  = $qruns->[$i] or last;
         my $mu = 0.0 + ($r->{len}      // 1);
@@ -453,17 +454,26 @@ sub _prefix_ub_with_perrun {
         my $w  = 0.0 + ($r->{weight}   // 1.0);
         my $x  = 0.0 + ($obs_runs->[$i]{len} // 0);
         my $eps = 0.25;  # dots, stability floor
-        my $z  = ($sd > $eps) ? (($x - $mu)/$sd) : (($x - $mu)/$eps);
-        my $s  = exp(-0.5 * $z * $z);
-        $acc  += $w * $s;
-        $w_sum+= $w;
-        $sim_prefix[$i] = $s;  # for colorization
+        my $z   = ($sd > $eps) ? (($x - $mu)/$sd) : (($x - $mu)/$eps);
+        my $s_raw = exp(-0.5 * $z * $z);
+
+        # Best-from-now for the *current* (last) observed run:
+        # if we're still under the pattern mean, we could stop now → 1.0
+        # else we’ve already overrun → actual similarity
+        my $s_use = ($i == $K-1 && $x <= $mu) ? 1.0 : $s_raw;
+
+        $acc   += $w * $s_use;
+        $w_sum += $w;
+        $sim_prefix[$i] = $s_use;   # keep viz consistent
+
+        # Remember salvageability of current run to gate suffix that follows
+        $g = $s_use if $i == $K-1;
     }
 
-    # suffix: assume perfect (optimistic UB)
+    # suffix: previously perfect(1.0) — now *gated* by current-run salvageability g
     for my $i ($K..$#$qruns) {
         my $w = 0.0 + ($qruns->[$i]{weight} // 1.0);
-        $acc  += $w * 1.0;
+        $acc  += $w * $g;
         $w_sum+= $w;
     }
 

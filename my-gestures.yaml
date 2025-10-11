@@ -18,9 +18,9 @@ patterns:
     weight: 1.000
     description: "Double Click"
     runs:
-      0: { type: press, variance: 1.397, weight: 1.000, samples: 9 }
+      0: { type: press, variance: 1.897, weight: 1.000, samples: 9 }
       1: { type: release, variance: 2.152, weight: 1.000, samples: 9 }
-      2: { type: press, variance: 1.215, weight: 1.000, samples: 9 }
+      2: { type: press, variance: 1.815, weight: 1.000, samples: 9 }
   - id: mediumpress
     name: "mediumpress"
     visual: ...........

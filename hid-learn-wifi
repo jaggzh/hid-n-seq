@@ -1,0 +1,514 @@
+#!/usr/bin/perl
+use v5.36;
+use Time::HiRes qw(time);
+use Getopt::Long::Descriptive;
+use List::Util qw(sum min max);
+use POSIX qw(floor ceil);
+use Scalar::Util qw(looks_like_number);
+use IO::Socket::INET;
+use IO::Select;
+
+# Term colors
+my $bmag="\033[35;1m";
+my $rst="\033[0m;
+
+# -------------------------------------------------------------------
+# CLI
+# -------------------------------------------------------------------
+my $def_port = 10101;
+
+my $usage_desc = "%c %o";
+my ($opt, $usage) = describe_options(
+    $usage_desc,
+    [ 'id=s'            => "Short id (e.g., dblclick). Defaults to slugified --name" ],
+    [ 'name|n=s'        => "Human name (default: gesture)", {
+        default => 'gesture'
+    }],
+    [ 'desc|d=s'        => "Description for YAML", {
+        default => 'Auto-learned pattern'
+    }],
+    [ 'net|N'           => "Use network mode instead of mouse" ],
+    [ 'port|p=i'        => "Listen port ($def_port) (implies -N)", {
+        default => $def_port,
+        implies => 'net'
+    }],
+    [ 'timeout|t=f'     => "Idle timeout to end a sample (default: 2.0)", {
+        default => 4.0
+    }],
+    [ 'quantum_s|q=f'   => "Seconds per dot (default: 0.02)", {
+        default => 0.02
+    }],
+    [ 'dot-ms=f'        => "Milliseconds per dot (overrides quantum_s)" ],
+    [ 'pat-dot-ms=f'    => "Per-pattern override in YAML" ],
+    [ 'weight=f'        => "Pattern-level weight for YAML (default: 1.0)", {
+        default => 1.0
+    }],
+    [ 'run-weight=f'    => "Default per-run weight for YAML (default: 1.0)", {
+        default => 1.0
+    }],
+    [ 'sym-press=s'     => "Symbol for press in visuals (default: .)", {
+        default => '.'
+    }],
+    [ 'sym-release=s'   => "Symbol for release in visuals (default: ~)", {
+        default => '~'
+    }],
+    [ 'max-plain-seq|x=f' => "Max seconds printed as raw glyphs before braces (default: 1.0)", {
+        default => 1.0
+    }],
+    [],
+    [ 'help|h'          => "Show this help", { shortcircuit => 1 } ],
+);
+
+print($usage->text), exit if $opt->help;
+
+# Process options
+my $id            = $opt->id;
+my $name          = $opt->name;
+my $desc          = $opt->desc;
+my $use_net       = $opt->net;
+my $port          = $opt->port;
+my $timeout       = $opt->timeout;
+my $quantum_s     = $opt->quantum_s;
+my $dot_ms        = $opt->dot_ms;
+my $pat_dot_ms    = $opt->pat_dot_ms;
+my $pat_weight    = $opt->weight;
+my $run_weight    = $opt->run_weight;
+my $sym_press     = $opt->sym_press;
+my $sym_release   = $opt->sym_release;
+my $max_plain_seq = $opt->max_plain_seq;
+
+if (defined $dot_ms) {
+    die "--dot-ms must be > 0\n" unless $dot_ms > 0;
+    $quantum_s = $dot_ms / 1000.0;
+}
+die "--quantum_s must be > 0\n" unless $quantum_s > 0;
+$dot_ms = 1000.0 * $quantum_s;
+
+$id ||= lc($name); 
+$id =~ s/[^a-z0-9]+/_/g; 
+$id =~ s/^_+|_+$//g;
+
+# -------------------------------------------------------------------
+# Mode-specific setup
+# -------------------------------------------------------------------
+my ($server, $sel_net, $client);
+my $mouse_enabled = 0;
+
+if ($use_net) {
+    # Network mode
+    $server = IO::Socket::INET->new(
+        LocalPort => $port,
+        Proto     => 'tcp',
+        Listen    => 5,
+        Reuse     => 1,
+    ) or die "Cannot create socket on port $port: $!\n";
+    $sel_net = IO::Select->new($server);
+} else {
+    # Mouse mode
+    require Term::ReadKey;
+    Term::ReadKey::ReadMode('cbreak');
+    print "\e[?1000;1003;1006h";  # XTerm: normal tracking, any-motion, SGR ext
+    $mouse_enabled = 1;
+}
+
+# -------------------------------------------------------------------
+# Explain
+# -------------------------------------------------------------------
+print "\n", "=" x 60, "\n";
+print "Pattern Learning Mode", ($use_net ? " (Network)" : " (Mouse)"), "\n";
+print "=" x 60, "\n";
+print "Listening on port: $port\n" if $use_net;
+print "Pattern id/name: $id / $name\n";
+print "Description: $desc\n";
+printf "Quantum: %.0f ms per dot\n", $dot_ms;
+printf "Sample idle timeout: %.2fs\n", $timeout;
+printf "max-plain-seq: %.2fs  (runs longer print braces: .{N})\n", $max_plain_seq;
+print "\nInstructions:\n";
+if ($use_net) {
+    print "  • Press button to start recording a sample\n";
+    print "  • Perform your gesture\n";
+    printf "  • Wait %.2fs to end the sample\n", $timeout;
+    print "  • Repeat to collect more samples\n";
+    print "  • Finish with Ctrl-C\n";
+} else {
+    print "  • Click to start recording a sample\n";
+    print "  • Perform your gesture\n";
+    printf "  • Wait %.2fs to end the sample\n", $timeout;
+    print "  • Repeat to collect more samples\n";
+    print "  • Finish with Ctrl-C, 'q', or Enter\n";
+}
+print "-" x 60, "\n\n";
+
+# -------------------------------------------------------------------
+# State
+# -------------------------------------------------------------------
+my @samples;              # each: { runs => [ {type, dur_s}... ] }
+my $recording = 0;
+my $curr      = undef;    # { events=>[ {type,time_s_rel}... ], t0 => abs_time }
+my $last_activity = 0;
+
+$SIG{INT} = sub { finish_learning() };
+
+if ($use_net) {
+    print "Waiting for network connection...\n";
+} else {
+    print "Waiting for first click to begin...\n";
+}
+
+# -------------------------------------------------------------------
+# Main loop
+# -------------------------------------------------------------------
+my $poll = 0.01;  # seconds
+MAIN: while (1) {
+    if ($use_net) {
+        # Network mode
+        my @ready = $sel_net->can_read($poll);
+        
+        foreach my $fh (@ready) {
+            if ($fh == $server) {
+                # New connection
+                $client = $server->accept();
+                $sel_net->add($client);
+                print "Client connected from ", $client->peerhost(), "\n";
+                print "Waiting for first button press to begin...\n";
+            } else {
+                # Data from client
+                my $line = <$fh>;
+                if (!defined $line) {
+                    # Client disconnected
+                    print "Client disconnected\n";
+                    $sel_net->remove($fh);
+                    $fh->close();
+                    $client = undef if $fh == $client;
+                    next;
+                }
+                
+                chomp($line);
+                $line =~ s/\r//g;
+                $line =~ s/^\s+|\s+$//g;
+                say "LINE: $bmag$line$rst";
+                
+                # Parse pat-press=#.# or pat-release=#.#
+                if ($line =~ /^pat-press/) {
+                    handle_button_event("press");
+				} elsif ($line =~ /^pat-release/) {
+                    handle_button_event("release");
+                }
+            }
+        }
+    } else {
+        # Mouse mode
+        my $c = Term::ReadKey::ReadKey(-1);
+        if (defined $c) {
+            # finish on q or Enter
+            if ($c eq 'q' || $c eq 'Q' || $c eq "\n" || $c eq "\r") {
+                finish_learning();
+            }
+            if ($c eq "\e") {
+                # read SGR mouse sequence
+                my $seq = $c;
+                while (defined(my $n = Term::ReadKey::ReadKey(-1))) {
+                    $seq .= $n;
+                    last if $n =~ /[A-Za-z~]$/;
+                }
+                if ($seq =~ /\e\[<(\d+);(\d+);(\d+)([Mm])/) {
+                    my ($btn, $x, $y, $state) = ($1, $2, $3, $4);
+                    next unless $btn == 0;            # left only
+                    my $pressed = ($state eq 'M');    # M=press, m=release
+                    my $type = $pressed ? 'press' : 'release';
+                    handle_button_event($type);
+                }
+            }
+        }
+        select(undef, undef, undef, $poll);
+    }
+    
+    # Check for sample timeout
+    if ($recording && $last_activity > 0) {
+        my $idle = time() - $last_activity;
+        if ($idle >= $timeout) {
+            end_sample();
+        }
+    }
+}
+
+# -------------------------------------------------------------------
+# Unified button event handler
+# -------------------------------------------------------------------
+sub handle_button_event {
+    my ($type) = @_;
+    my $now = time();
+    
+    if (!$recording && $type eq 'press') {
+        start_sample();
+    }
+    
+    if ($recording) {
+        record_edge($type, $now);
+        $last_activity = $now;
+    }
+}
+
+# -------------------------------------------------------------------
+# Recording helpers
+# -------------------------------------------------------------------
+sub start_sample {
+    $recording = 1;
+    $curr = { events => [], t0 => time() };
+    my $n = scalar(@samples) + 1;
+    print "\n[Recording sample #$n...]\n";
+}
+
+sub record_edge {
+    my ($kind, $now) = @_;
+    my $t_rel = $now - $curr->{t0};
+    push @{$curr->{events}}, { type => $kind, time => $t_rel };
+    print sprintf("  %s at %.3fs\n", uc($kind), $t_rel);
+}
+
+sub end_sample {
+    return unless $recording;
+    $recording = 0;
+    $last_activity = 0;
+    my $ev = $curr->{events};
+    my $presses  = scalar grep { $_->{type} eq 'press' } @$ev;
+    my $releases = scalar grep { $_->{type} eq 'release' } @$ev;
+    
+    if ($presses != $releases || $presses == 0) {
+        print "  [Sample rejected: unmatched press/release]\n";
+    } else {
+        # Build runs (hold, then pause, alternating)
+        my @runs;
+        for (my $i=0; $i<scalar(@$ev); $i+=2) {
+            next unless $i+1 < scalar(@$ev);
+            my $p = $ev->[$i];     # press
+            my $r = $ev->[$i+1];   # release
+            next unless $p->{type} eq 'press' && $r->{type} eq 'release';
+            my $hold  = $r->{time} - $p->{time};
+            push @runs, { type=>'press',   dur_s=>$hold };
+            if ($i+2 < scalar(@$ev)) {
+                my $np = $ev->[$i+2]; # next press
+                my $gap = $np->{time} - $r->{time};
+                push @runs, { type=>'release', dur_s=>$gap };
+            }
+        }
+        my $seq = render_visual_ascii(\@runs);
+        push @samples, { runs=>\@runs, visual=>$seq };
+        my $n = scalar(@samples);
+        print "  [Sample #$n recorded]\n";
+        print "  Sequence: $seq\n";
+    }
+    
+    if ($use_net) {
+        print "\nWaiting for next sample (Ctrl-C to finish)...\n";
+    } else {
+        print "\nWaiting for next sample (Ctrl-C / q / Enter to finish)...\n";
+    }
+    $curr = undef;
+}
+
+# -------------------------------------------------------------------
+# Finish / stats / YAML
+# -------------------------------------------------------------------
+sub finish_learning {
+    # Cleanup based on mode
+    if ($use_net) {
+        $server->close() if $server;
+    } else {
+        if ($mouse_enabled) {
+            print "\e[?1000;1003;1006l";
+            Term::ReadKey::ReadMode('restore');
+        }
+    }
+    
+    print "\n\n", "=" x 60, "\n";
+    print "Learning Complete!\n";
+    print "=" x 60, "\n\n";
+    
+    if (!@samples) {
+        print "No valid samples recorded.\n";
+        exit 1;
+    }
+    
+    print "Recorded ", scalar(@samples), " sample(s)\n\n";
+    print "Individual samples:\n";
+    for my $i (0..$#samples) {
+        my $s = $samples[$i];
+        print "  #", ($i+1), ": ", $s->{visual}, "\n";
+    }
+    
+    # Outlier removal by run-count
+    my $mode_runs = modal_run_count(\@samples);
+    my @kept = grep { scalar(@{$_->{runs}}) == $mode_runs } @samples;
+    printf "\nKept %d / %d samples with %d runs (dropped %d by run-count)\n",
+        scalar(@kept), scalar(@samples), $mode_runs, scalar(@samples)-scalar(@kept);
+    
+    if (scalar(@kept) < 2) {
+        print "\nNot enough aligned samples after filtering; try recording more.\n";
+        emit_yaml(\@kept);
+        exit 0;
+    }
+    
+    emit_yaml(\@kept);
+    print_suggestions(\@kept);
+    exit 0;
+}
+
+# -------------------------------------------------------------------
+# Stats → YAML
+# -------------------------------------------------------------------
+sub emit_yaml {
+    my ($kept_ref) = @_;
+    # per-run arrays of durations (in seconds)
+    my $runN = scalar(@{$kept_ref->[0]{runs}});
+    my @by_run; for (1..$runN) { push @by_run, [] }
+    my @run_type;
+    for my $s (@$kept_ref) {
+        for my $i (0..$#{$s->{runs}}) {
+            my $r = $s->{runs}[$i];
+            $run_type[$i] //= $r->{type};
+            push @{$by_run[$i]}, $r->{dur_s};
+        }
+    }
+    
+    # stats per run
+    my (@mean_s, @sd_s, @mean_dots, @sd_dots);
+    for my $i (0..$#by_run) {
+        my $list = $by_run[$i];
+        my $n = scalar(@$list);
+        my $mean = sum(@$list)/$n;
+        my $sd = stddev($list);
+        $mean_s[$i] = $mean;
+        $sd_s[$i]   = $sd;
+        $mean_dots[$i] = $mean / $quantum_s;
+        $sd_dots[$i]   = $sd   / $quantum_s;
+    }
+    
+    # visuals
+    my $visual_ascii   = render_visual_ascii_from_means(\@mean_s, \@run_type);
+    my $visual_numeric = render_visual_numeric_dots(\@mean_dots, \@run_type);
+    
+    # YAML v3
+    print "\n---\n";
+    print "version: 3\n";
+    printf "dot_ms: %.3f\n", $dot_ms;
+    print "\npatterns:\n";
+    print "  - id: $id\n";
+    print "    name: \"$name\"\n";
+    print "    visual: $visual_ascii\n";
+    print "    # visual_numeric: $visual_numeric\n";
+    if (defined $pat_dot_ms) { printf "    dot_ms: %.3f\n", $pat_dot_ms; }
+    printf "    weight: %.3f\n", $pat_weight;
+    print "    description: \"$desc\"\n";
+    print "    runs:\n";
+    for my $i (0..$#mean_dots) {
+        my $ty = $run_type[$i];
+        my $var = $sd_dots[$i];
+        my $n = scalar(@{$by_run[$i]});
+        printf "      %d: { type: %s, variance: %.3f, weight: %.3f, samples: %d }\n",
+            $i, $ty, $var, $run_weight, $n;
+    }
+    # symbols note
+    print "# sym_press=\"$sym_press\" sym_release=\"$sym_release\"\n";
+    print "# Edit per-run 'variance' (in dots) and 'weight' to tune tolerance/importance.\n";
+}
+
+# -------------------------------------------------------------------
+# Rendering helpers
+# -------------------------------------------------------------------
+sub render_visual_ascii {
+    my ($runs_ref) = @_;
+    my @syms = map { $_->{type} eq 'press' ? $sym_press : $sym_release } @$runs_ref;
+    my @dur_s = map { $_->{dur_s} } @$runs_ref;
+    return render_visual_ascii_from_means(\@dur_s, [ map { $_->{type} } @$runs_ref ]);
+}
+
+sub render_visual_ascii_from_means {
+    my ($mean_s_ref, $run_type_ref) = @_;
+    my $s = '';
+    for my $i (0..$#$mean_s_ref) {
+        my $ty = $run_type_ref->[$i] // 'press';
+        my $sym = ($ty eq 'press') ? $sym_press : $sym_release;
+        my $sec = $mean_s_ref->[$i];
+        if ($sec > $max_plain_seq) {
+            my $dots = $sec / $quantum_s;
+            $s .= sprintf("%s{%.1f}", $sym, $dots);
+        } else {
+            my $dots_i = int( ($sec / $quantum_s) + 0.5 );
+            $dots_i = 1 if $dots_i < 1;
+            $s .= ($sym x $dots_i);
+        }
+    }
+    return $s;
+}
+
+sub render_visual_numeric_dots {
+    my ($mean_dots_ref, $run_type_ref) = @_;
+    my $s = '';
+    for my $i (0..$#$mean_dots_ref) {
+        my $ty  = $run_type_ref->[$i] // 'press';
+        my $sym = ($ty eq 'press') ? $sym_press : $sym_release;
+        $s .= sprintf("%s{%.1f}", $sym, $mean_dots_ref->[$i]);
+    }
+    return $s;
+}
+
+# -------------------------------------------------------------------
+# Utilities
+# -------------------------------------------------------------------
+sub stddev {
+    my ($arr) = @_;
+    my $n = scalar(@$arr);
+    return 0.0 if $n < 2;
+    my $mean = sum(@$arr)/$n;
+    my $ss = 0.0; $ss += ($_ - $mean)**2 for @$arr;
+    my $var = $ss / ($n - 1);
+    return sqrt($var);
+}
+
+sub modal_run_count {
+    my ($sref) = @_;
+    my %freq;
+    for my $s (@$sref) {
+        my $k = scalar(@{$s->{runs}});
+        $freq{$k}++;
+    }
+    my ($best_k, $best_v) = (0, -1);
+    while (my ($k,$v) = each %freq) { ($best_k,$best_v) = ($k,$v) if $v>$best_v; }
+    return $best_k;
+}
+
+sub print_suggestions {
+    my ($kept_ref) = @_;
+    my $runN = scalar(@{$kept_ref->[0]{runs}});
+    my @by_run; for (1..$runN) { push @by_run, [] }
+    for my $s (@$kept_ref) {
+        for my $i (0..$#{$s->{runs}}) { push @{$by_run[$i]}, $s->{runs}[$i]{dur_s}; }
+    }
+    my $any_high = 0;
+    for my $i (0..$#by_run) {
+        my $list = $by_run[$i];
+        next unless @$list >= 2;
+        my $avg = sum(@$list)/@$list;
+        my $sd  = stddev($list);
+        if ($sd > 0.30 * $avg) { $any_high = 1; last; }
+    }
+    print "\n", "-" x 60, "\n";
+    print "Suggestions:\n";
+    print "-" x 60, "\n";
+    if ($any_high) {
+        print <<"EOT";
+⚠️  High timing variance detected in some segments.
+   • If other patterns are clearly different, this may be fine.
+   • Otherwise consider choosing rhythms with more contrast,
+     or practicing a bit to increase consistency.
+EOT
+    }
+    if (scalar(@$kept_ref) < 3) {
+        print "💡 Record a few more samples (≥3) for better statistics.\n";
+    }
+    print <<"EOT";
+Tip: Extremely long holds/pauses can be fatiguing. If you see very large braces
+     forms like .{50.0}, either shorten the gesture or assign it to a less-used action.
+EOT
+}

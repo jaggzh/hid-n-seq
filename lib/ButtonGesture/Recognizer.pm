@@ -238,6 +238,12 @@ sub _evaluate_if_ready {
             push @ub_idx, $idx;         # strict supersequences
             next;
         }
+		# INVALIDATION: Skip patterns where obs exceeds pattern length
+		if (@$obs_runs > @{$p->{runs}}) {
+			# Don't compute score at all - pattern is invalid
+			next;
+		}
+
 
         # Full prefix covered: compute score and DONE state
         my ($raw, $perrun_info) = _full_score_variance($obs_runs, $p);
@@ -324,6 +330,15 @@ sub _evaluate_if_ready {
     my $best_done_idx   = -1;
     my $best_done_score = 0.0;
     for my $c (@full) {
+        my $p = $self->{patterns}[$c->{idx}];
+        
+        # INVALIDATION: Skip patterns where observation has exceeded pattern length
+        next if @$obs_runs > @{$p->{runs}};
+        
+        # Only consider patterns that are actually DONE and meet threshold
+        next unless $c->{is_done};
+        next unless $c->{peak_done} >= $threshold;
+        
         if ($c->{peak_done} > $best_done_score) {
             $best_done_score = $c->{peak_done};
             $best_done_idx   = $c->{idx};
@@ -337,9 +352,17 @@ sub _evaluate_if_ready {
         for my $j (0 .. $#{$self->{patterns}}) {
             next if $j == $best_done_idx;
             my $q = $self->{patterns}[$j];
+            
+            # INVALIDATION: Skip patterns we've already exceeded
+            next if @$obs_runs > @{$q->{runs}};
+            
             next unless _runs_prefix($obs_runs, $q->{runs});
             next if @$obs_runs >= @{$q->{runs}} && $self->_pattern_is_done($obs_runs, $q, $last_kind);
             my ($ub_raw_j, undef) = _prefix_ub_with_perrun($obs_runs, $q);
+            
+            # INVALIDATION by UB: If UB is below threshold, pattern has failed
+            next if $ub_raw_j < $threshold;
+            
             my $ub_w_j = ($ub_raw_j * ($q->{weight} // 1.0)) * $patience;
             $ub_competitors = $ub_w_j if $ub_w_j > $ub_competitors;
         }
@@ -730,9 +753,12 @@ sub _facet_rel_label {
     my ($self, $obs_runs, $p, $is_done) = @_;
     my $Lobs = scalar(@$obs_runs);
     my $Lpat = $p->{runs_count} // scalar(@{$p->{runs}});
+    
+    # INVALIDATED by run count exceeding pattern
+    return 'REL:INVALID' if $Lobs > $Lpat;
+    
     # If this pattern was ever done earlier, reflect that stably in the facet.
     if ($p->{_ever_done}) {
-        return 'REL:OVER' if $Lobs > $Lpat;
         return 'REL:DONE';
     }
     return 'REL:LAST'  if $Lobs >= $Lpat;                    # in final run but not done

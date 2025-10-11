@@ -119,11 +119,8 @@ sub main {
     
     # Common display
     print "Available gestures:\n";
-    print "  - click: Quick click\n";
-    print "  - doubleclick: Two quick clicks\n";
-    print "  - longpress: Hold for a second\n";
-    print "  - 'menu': click .. click-click (intended for a menu but it's just a name).\n";
-    print "  - (not in my-gestures.yaml): Press-Tap: Long press, release, then tap\n";
+	# Need to retrieve from yaml and display to user
+	# eg. print "  - click: description...\n";
     print "\n";
     
     if ($use_net) {

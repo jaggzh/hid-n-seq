@@ -93,6 +93,7 @@ sub reset {
     $self->{_first_event_t} = undef;
     $self->{_last_event_t}  = undef;
     $self->{_last_debug_line} = undef;
+	$self->{_last_obs_key} = undef;
     # clear per-pattern peak_done each fresh observation
     for my $p (@{$self->{patterns}}) { $p->{_peak_done} = 0.0; $p->{_ever_done} = 0; }
 }
@@ -226,6 +227,13 @@ sub _evaluate_if_ready {
     );
     return unless @$obs_runs;
 
+    my $obs_key = join(',', map { $_->{sym} . $_->{len} } @$obs_runs);
+    if (defined $self->{_last_obs_key} && $self->{_last_obs_key} eq $obs_key) {
+        return;  # No change, skip evaluation
+    }
+    $self->{_last_obs_key} = $obs_key;
+
+
     my @full = ();                      # now "prefix-covered" candidates
     my ($best_ub_w, $best_ub_raw, $best_ub_idx) = (0.0, 0.0, -1);
     my @ub_idx = ();                    # indices to consider for UB
@@ -240,7 +248,13 @@ sub _evaluate_if_ready {
         }
 
         # INVALIDATION: obs exceeds pattern length
-        if (@$obs_runs > @{$p->{runs}}) {
+		# BUT: if pattern ends with press (dot), and obs is pattern+1 with final release, that's OK (it's the DONE signal)
+		my $pattern_ends_with_press = ($p->{runs}[-1]{sym} eq $self->{sym_press});
+		my $obs_is_just_release_after = (@$obs_runs == @{$p->{runs}} + 1 && 
+										  $obs_runs->[-1]{sym} eq $self->{sym_release});
+
+		if (@$obs_runs > @{$p->{runs}} && !($pattern_ends_with_press && $obs_is_just_release_after)) {
+
             # Add to @full for viz, but mark as invalidated
             push @full, {
                 name        => ($p->{name} // $p->{id} // "pattern_$idx"),
@@ -477,11 +491,14 @@ sub _full_score_variance {
         push @per_info, { sym => $r->{sym}, pen => ($z*$z), sim => $s };
     }
     my $raw = ($w_sum>0 ? $acc/$w_sum : 0.0);
+    # my $edges_total = ($L > 1) ? ($L - 1) : 1;
+	# say "DEBUG: Pattern=$p->{name} raw_before_edge=$raw edges_total=$edges_total" if $p->{name} eq 'click';
+
 
     # transition (edge) bonus — more observed edges ⇒ slightly higher raw
     my $ew = $p->{_edge_bonus_weight} // 0.0;
     if ($ew > 0) {
-        my $edges_total = ($L > 1) ? ($L - 1) : 1;
+		my $edges_total = ($L > 1) ? ($L - 1) : 1;
         my $edges_have  = max(0, min($edges_total, scalar(@$obs_runs) - 1));
         my $edge_frac   = ($edges_total > 0) ? ($edges_have / $edges_total) : 1.0;
         $raw *= (1.0 + $ew * $edge_frac);
@@ -778,16 +795,24 @@ sub _facet_rel_label {
     my $Lobs = scalar(@$obs_runs);
     my $Lpat = $p->{runs_count} // scalar(@{$p->{runs}});
     
-    # INVALIDATED by run count exceeding pattern
-    return 'REL:INVALID' if $Lobs > $Lpat;
+    # Check if this is the special case: dot-ended pattern with release after
+    my $pattern_ends_with_press = ($p->{runs}[-1]{sym} eq $self->{sym_press});
+    my $obs_is_just_release_after = ($Lobs == $Lpat + 1 && 
+                                      $obs_runs->[-1]{sym} eq $self->{sym_release});
+    
+    # INVALIDATED by run count exceeding pattern (except for dot+release case)
+    if ($Lobs > $Lpat && !($pattern_ends_with_press && $obs_is_just_release_after)) {
+        return 'REL:INVALID';
+    }
     
     # If this pattern was ever done earlier, reflect that stably in the facet.
     if ($p->{_ever_done}) {
         return 'REL:DONE';
     }
-    return 'REL:LAST'  if $Lobs >= $Lpat;                    # in final run but not done
-    return sprintf('REL:PART %d/%d', $Lobs, $Lpat);          # prefix coverage only
+    return 'REL:LAST'  if $Lobs >= $Lpat;
+    return sprintf('REL:PART %d/%d', $Lobs, $Lpat);
 }
+
 
 # abbreviated pattern for pat="...": prefix colored by per-run penalty; remainder dim
 sub _viz_pattern_abbrev_perrun {

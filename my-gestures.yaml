@@ -4,7 +4,7 @@ dot_ms: 20.000
 
 patterns:
   - id: click
-    name: "Click"
+    name: "click"
     visual: ....
     # visual_numeric: .{7.1}
     weight: 1.000

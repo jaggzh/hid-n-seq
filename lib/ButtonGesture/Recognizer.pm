@@ -44,10 +44,10 @@ sub new {
         # Commit guard: block commit if any open UB ≥ threshold
         open_guard          => exists $a{open_guard}           ? !!$a{open_guard}              : 1,
         open_guard_threshold=> defined $a{open_guard_threshold}? 0.0 + $a{open_guard_threshold} : undef,
-        # DONE detection (NEW)
+        # DONE detection
         done_k_sigma        => defined $a{done_k_sigma}        ? 0.0 + $a{done_k_sigma}        : 1.00,
-        # UB peak turnover sensitivity (in weighted-score space)
-        ub_peak_drop_epsilon=> defined $a{ub_peak_drop_epsilon}? 0.0 + $a{ub_peak_drop_epsilon}: 0.02,
+        edge_bonus_weight   => defined $a{edge_bonus_weight}   ? 0.0 + $a{edge_bonus_weight}   : 0.40,
+        hold_ub_threshold   => defined $a{hold_ub_threshold}   ? 0.0 + $a{hold_ub_threshold}   : (defined $a{commit_threshold} ? 0.0 + $a{commit_threshold} : 0.75),
         # symbols
         sym_press           => defined $a{sym_press}           ? $a{sym_press}                 : '.',
         sym_release         => defined $a{sym_release}         ? $a{sym_release}               : '~',
@@ -154,6 +154,8 @@ sub _precompute_patterns {
         $p->{len_total}  = $len_total;
         $p->{run_w_sum}  = $w_total;
         $p->{runs_count}    = scalar(@{$p->{runs}});
+        # per-pattern cached transition bonus weight (allows per-pattern override later)
+        $p->{_edge_bonus_weight} = (defined $p->{edge_bonus_weight} ? 0.0 + $p->{edge_bonus_weight} : $self->{edge_bonus_weight});
     }
 }
 
@@ -329,17 +331,51 @@ sub _evaluate_if_ready {
     }
 
     if ($best_done_idx >= 0 && $best_done_score >= $threshold) {
+
+        # (A) max UB among all plausible competitors (existing logic)
         my $ub_competitors = 0.0;
         for my $j (0 .. $#{$self->{patterns}}) {
             next if $j == $best_done_idx;
             my $q = $self->{patterns}[$j];
-            # RELAXED: include LAST patterns that are not done yet
-            next unless _runs_prefix_relaxed($obs_runs, $q->{runs});
-            next if (@$obs_runs == @{$q->{runs}} && $self->_pattern_is_done($obs_runs, $q, $last_kind));
+            next unless _runs_prefix($obs_runs, $q->{runs});
+            next if @$obs_runs >= @{$q->{runs}} && $self->_pattern_is_done($obs_runs, $q, $last_kind);
             my ($ub_raw_j, undef) = _prefix_ub_with_perrun($obs_runs, $q);
             my $ub_w_j = ($ub_raw_j * ($q->{weight} // 1.0)) * $patience;
             $ub_competitors = $ub_w_j if $ub_w_j > $ub_competitors;
         }
+
+		if (1) {
+			# (B) NEW: Superset hold — if any strict superset of best_done is still viable and high, defer commit
+			my $hold_th   = defined($self->{hold_ub_threshold}) ? $self->{hold_ub_threshold} : $threshold;
+			my $hold_max  = 0.0;
+			my $p_best    = $self->{patterns}[$best_done_idx];
+
+			for my $j (0 .. $#{$self->{patterns}}) {
+				next if $j == $best_done_idx;
+				my $q = $self->{patterns}[$j];
+				next unless _is_strict_superset($q, $p_best);
+
+				my $val = 0.0;
+				if (@$obs_runs < @{$q->{runs}}) {
+					my ($ub_raw_j, undef) = _prefix_ub_with_perrun($obs_runs, $q);
+					$val = $ub_raw_j * ($q->{weight} // 1.0);
+				} else {
+					# If already FULL for q, use its current weighted score (or recompute) as a conservative competitor
+					my ($full_q) = grep { $_->{idx} == $j } @full;
+					if ($full_q) {
+						$val = $full_q->{score};
+					} else {
+						my ($raw_q, undef) = _full_score_variance($obs_runs, $q);
+						$val = $raw_q * ($q->{weight} // 1.0);
+					}
+				}
+				$val *= $patience;
+				$hold_max = $val if $val > $hold_max;
+			}
+
+			# If a strict superset still has enough headroom, wait.
+			return if $hold_max >= $hold_th;
+		}
 
         if ($best_done_score >= $ub_competitors + $margin) {
             my $name = $self->{patterns}[$best_done_idx]{name} // $self->{patterns}[$best_done_idx]{id} // "pattern_$best_done_idx";
@@ -393,7 +429,19 @@ sub _full_score_variance {
         $w_sum+= $w;
         push @per_info, { sym => $r->{sym}, pen => ($z*$z), sim => $s };
     }
-    return ( ($w_sum>0 ? $acc/$w_sum : 0.0), \@per_info );
+    my $raw = ($w_sum>0 ? $acc/$w_sum : 0.0);
+
+    # transition (edge) bonus — more observed edges ⇒ slightly higher raw
+    my $ew = $p->{_edge_bonus_weight} // 0.0;
+    if ($ew > 0) {
+        my $edges_total = ($L > 1) ? ($L - 1) : 1;
+        my $edges_have  = max(0, min($edges_total, scalar(@$obs_runs) - 1));
+        my $edge_frac   = ($edges_total > 0) ? ($edges_have / $edges_total) : 1.0;
+        $raw *= (1.0 + $ew * $edge_frac);
+        $raw  = 1.0 if $raw > 1.0;  # keep raw ≤ 1 before pattern weight
+    }
+
+    return ($raw, \@per_info);
 }
 
 # UB for a longer pattern q: prefix scored as-is; suffix assumed perfect (score=1)
@@ -426,7 +474,7 @@ sub _prefix_upperbound_variance {
     return ($w_sum>0 ? $acc/$w_sum : 0.0);
 }
 
-# NEW: UB with per-run similarities (for colored viz prefix)
+# UB with per-run similarities (for colored viz prefix)
 sub _prefix_ub_with_perrun {
     my ($obs_runs, $q) = @_;
     my $qruns = $q->{runs};
@@ -435,35 +483,44 @@ sub _prefix_ub_with_perrun {
     my $w_sum = 0.0; my $acc = 0.0;
     my @sim_prefix;
 
-    # prefix: score observed runs against q's runs (current run uses best-from-now)
-    my $g = 1.0;  # salvageability of current run (gates suffix)
-    for my $i (0..$K-1) {
+    # prefix: earlier closed runs scored as observed
+    for my $i (0..$K-2) {
         my $r  = $qruns->[$i] or last;
         my $mu = 0.0 + ($r->{len}      // 1);
         my $sd = 0.0 + ($r->{variance} // 1.0);
         my $w  = 0.0 + ($r->{weight}   // 1.0);
         my $x  = 0.0 + ($obs_runs->[$i]{len} // 0);
-        my $eps = 0.25;  # dots, stability floor
+        my $eps = 0.25;
         my $z   = ($sd > $eps) ? (($x - $mu)/$sd) : (($x - $mu)/$eps);
-        my $s_raw = exp(-0.5 * $z * $z);
-
-        # Best-from-now for the *current* (last) observed run:
-        # if we're still under the pattern mean, we could stop now → 1.0
-        # else we’ve already overrun → actual similarity
-        my $s_use = ($i == $K-1 && $x <= $mu) ? 1.0 : $s_raw;
-
-        $acc   += $w * $s_use;
-        $w_sum += $w;
-        $sim_prefix[$i] = $s_use;   # keep viz consistent
-
-        # Remember salvageability of current run to gate suffix that follows
-        $g = $s_use if $i == $K-1;
+        my $s   = exp(-0.5 * $z * $z);
+        $acc  += $w * $s;
+        $w_sum+= $w;
+        $sim_prefix[$i] = $s;
     }
 
-    # suffix: previously perfect(1.0) — now *gated* by current-run salvageability g
+    # current open run (salvage-aware)
+    if ($K >= 1) {
+        my $i  = $K-1;
+        if (my $r = $qruns->[$i]) {
+            my $mu = 0.0 + ($r->{len}      // 1);
+            my $sd = 0.0 + ($r->{variance} // 1.0);
+            my $w  = 0.0 + ($r->{weight}   // 1.0);
+            my $x  = 0.0 + ($obs_runs->[$i]{len} // 0);
+            my $eps = 0.25;
+            my $z_now = ($sd > $eps) ? (($x - $mu)/$sd) : (($x - $mu)/$eps);
+            my $s_now = exp(-0.5 * $z_now * $z_now);
+            # salvage: if we can still reach μ by ending soon, UB=1 for this run; otherwise best is current
+            my $s_feasible = ($x <= $mu) ? 1.0 : $s_now;
+            $acc  += $w * $s_feasible;
+            $w_sum+= $w;
+            $sim_prefix[$i] = $s_feasible;
+        }
+    }
+
+    # suffix: assume perfect
     for my $i ($K..$#$qruns) {
         my $w = 0.0 + ($qruns->[$i]{weight} // 1.0);
-        $acc  += $w * $g;
+        $acc  += $w * 1.0;
         $w_sum+= $w;
     }
 
@@ -471,6 +528,46 @@ sub _prefix_ub_with_perrun {
     return ($ub, \@sim_prefix);
 }
 
+# -----------------------------------------------------------------------------
+# Scoring (variance-driven)
+# -----------------------------------------------------------------------------
+
+# best-case from "now" to completion for FULL-but-not-done patterns
+sub _bestcase_continue_score {
+    my ($obs_runs, $p) = @_;
+    my $pruns = $p->{runs};
+    my $L = scalar(@$pruns);
+
+    my $w_sum = 0.0; my $acc = 0.0;
+    for my $i (0..$L-2) {                               # all fixed earlier runs
+        my $r  = $pruns->[$i];
+        my $mu = 0.0 + ($r->{len}      // 1);
+        my $sd = 0.0 + ($r->{variance} // 1.0);
+        my $w  = 0.0 + ($r->{weight}   // 1.0);
+        my $x  = 0.0 + ($obs_runs->[$i]{len} // 0);
+        my $eps= 0.25;
+        my $z  = ($sd > $eps) ? (($x - $mu)/$sd) : (($x - $mu)/$eps);
+        my $s  = exp(-0.5 * $z * $z);
+        $acc  += $w * $s;
+        $w_sum+= $w;
+    }
+
+    # last run: salvage-aware (can we still hit μ?)
+    my $rL  = $pruns->[$L-1];
+    my $muL = 0.0 + ($rL->{len}      // 1);
+    my $sdL = 0.0 + ($rL->{variance} // 1.0);
+    my $wL  = 0.0 + ($rL->{weight}   // 1.0);
+    my $xL  = 0.0 + ($obs_runs->[$L-1]{len} // 0);
+    my $eps = 0.25;
+    my $zL  = ($sdL > $eps) ? (($xL - $muL)/$sdL) : (($xL - $muL)/$eps);
+    my $s_now = exp(-0.5 * $zL * $zL);
+    my $s_feasible = ($xL <= $muL) ? 1.0 : $s_now;
+
+    $acc  += $wL * $s_feasible;
+    $w_sum+= $wL;
+
+    return ($w_sum>0 ? $acc/$w_sum : 0.0);
+}
 
 # -----------------------------------------------------------------------------
 # Observation utilities
@@ -518,6 +615,18 @@ sub _runs_prefix {
     return 0 unless scalar(@$b_ref) > $n; # strict supersequence only
     for my $i (0..$n-1) {
         return 0 unless ($a_ref->[$i]{sym} // '') eq ($b_ref->[$i]{sym} // '');
+    }
+    return 1;
+}
+
+# strict superset check for patterns (by symbol prefix only)
+sub _is_strict_superset {
+    my ($super_p, $sub_p) = @_;
+    my $A = $sub_p->{runs} // [];
+    my $B = $super_p->{runs} // [];
+    return 0 unless @$B > @$A;
+    for my $i (0..$#$A) {
+        return 0 unless ($A->[$i]{sym} // '') eq ($B->[$i]{sym} // '');
     }
     return 1;
 }

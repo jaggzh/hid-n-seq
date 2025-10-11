@@ -238,12 +238,24 @@ sub _evaluate_if_ready {
             push @ub_idx, $idx;         # strict supersequences
             next;
         }
-		# INVALIDATION: Skip patterns where obs exceeds pattern length
-		if (@$obs_runs > @{$p->{runs}}) {
-			# Don't compute score at all - pattern is invalid
-			next;
-		}
 
+        # INVALIDATION: obs exceeds pattern length
+        if (@$obs_runs > @{$p->{runs}}) {
+            # Add to @full for viz, but mark as invalidated
+            push @full, {
+                name        => ($p->{name} // $p->{id} // "pattern_$idx"),
+                score       => 0.0,
+                raw         => 0.0,
+                idx         => $idx,
+                perrun_info => [],
+                runs_count  => $p->{runs_count},
+                len_total   => $p->{len_total},
+                is_done     => 0,
+                peak_done   => 0.0,
+                invalidated => 1,
+            };
+            next;
+        }
 
         # Full prefix covered: compute score and DONE state
         my ($raw, $perrun_info) = _full_score_variance($obs_runs, $p);
@@ -268,6 +280,7 @@ sub _evaluate_if_ready {
             len_total   => $p->{len_total},
             is_done     => $is_done,
             peak_done   => ($p->{_peak_done} // 0.0),
+            invalidated => 0,
         };
     }
 
@@ -332,6 +345,9 @@ sub _evaluate_if_ready {
     for my $c (@full) {
         my $p = $self->{patterns}[$c->{idx}];
         
+        # Skip invalidated patterns
+        next if $c->{invalidated};
+        
         # INVALIDATION: Skip patterns where observation has exceeded pattern length
         next if @$obs_runs > @{$p->{runs}};
         
@@ -376,16 +392,24 @@ sub _evaluate_if_ready {
 			for my $j (0 .. $#{$self->{patterns}}) {
 				next if $j == $best_done_idx;
 				my $q = $self->{patterns}[$j];
+				
+				# INVALIDATION: Skip if obs exceeds this pattern
+				next if @$obs_runs > @{$q->{runs}};
+				
 				next unless _is_strict_superset($q, $p_best);
 
 				my $val = 0.0;
 				if (@$obs_runs < @{$q->{runs}}) {
 					my ($ub_raw_j, undef) = _prefix_ub_with_perrun($obs_runs, $q);
+					
+					# INVALIDATION by UB: If UB below threshold, pattern has failed
+					next if $ub_raw_j < $threshold;
+					
 					$val = $ub_raw_j * ($q->{weight} // 1.0);
 				} else {
 					# If already FULL for q, use its current weighted score (or recompute) as a conservative competitor
 					my ($full_q) = grep { $_->{idx} == $j } @full;
-					if ($full_q) {
+					if ($full_q && !$full_q->{invalidated}) {
 						$val = $full_q->{score};
 					} else {
 						my ($raw_q, undef) = _full_score_variance($obs_runs, $q);
@@ -840,18 +864,27 @@ sub _debug_dump_candidates {
 
     my %seen_full = map { $self->{patterns}[ $_->{idx} ]{name} // $_->{idx} => 1 } @$full_ref;
 
-    # FULL-ish rows (prefix-covered): print REL facet instead of the old "FULL"
+    # FULL-ish rows (prefix-covered or invalidated)
     for my $c (@$full_ref) {
         my $p = $self->{patterns}[$c->{idx}];
         my $rel = $self->_facet_rel_label($obs_runs, $p, $c->{is_done});
-        my $k = $p->{runs_count};                              # FULL: obs >= pat
-        my $per = $c->{perrun_info} // $c->{perrun};   # backward compatibility
+        my $k = $p->{runs_count};
+        my $per = $c->{perrun_info} // $c->{perrun};
         my $pat = $self->_viz_pattern_abbrev_perrun($per, $p->{runs}, $k);
-        printf("  %-14s %-12s %s  score=%.3f  w=%.2f  pat=\"%s\"\n",
-               $c->{name}, $rel, $usr_label, $c->{score}, ($p->{weight}//1.0), $pat);
+        
+        # Compute UB for this pattern (if not invalidated and still has potential)
+        my $ub_str = '';
+        if (!$c->{invalidated} && @$obs_runs < @{$p->{runs}}) {
+            my ($ub_raw, undef) = _prefix_ub_with_perrun($obs_runs, $p);
+            my $ub_w = $ub_raw * ($p->{weight} // 1.0);
+            $ub_str = sprintf(" UB=%.3f", $ub_w);
+        }
+        
+        printf("  %-14s %-12s %s  score=%.3f  w=%.2f%s  pat=\"%s\"\n",
+               $c->{name}, $rel, $usr_label, $c->{score}, ($p->{weight}//1.0), $ub_str, $pat);
     }
 
-    # UB rows: strict supersequences of observation prefix (prefix colored, suffix dim)
+    # UB rows: strict supersequences of observation prefix
     for my $j (0 .. $#{$self->{patterns}}) {
         my $p = $self->{patterns}[$j];
         my $name = $p->{name} // $p->{id} // "pattern_$j";
@@ -864,7 +897,7 @@ sub _debug_dump_candidates {
         my $per  = _sim_prefix_to_perrun($p, $sim_prefix);
         my $pat  = $self->_viz_pattern_abbrev_perrun($per, $p->{runs}, $k);
         my $rel  = sprintf('REL:PART %d/%d', $k, scalar(@{$p->{runs}}));
-        printf("  %-14s %-12s %s  PAT:OPEN BC=%.3f  w=%.2f  pat=\"%s\"\n",
+        printf("  %-14s %-12s %s  PAT:OPEN UB=%.3f  w=%.2f  pat=\"%s\"\n",
                $name, $rel, $usr_label, $ub_w, ($p->{weight}//1.0), $pat);
     }
 }

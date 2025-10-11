@@ -48,6 +48,8 @@ sub new {
         done_k_sigma        => defined $a{done_k_sigma}        ? 0.0 + $a{done_k_sigma}        : 1.00,
         edge_bonus_weight   => defined $a{edge_bonus_weight}   ? 0.0 + $a{edge_bonus_weight}   : 0.40,
         hold_ub_threshold   => defined $a{hold_ub_threshold}   ? 0.0 + $a{hold_ub_threshold}   : (defined $a{commit_threshold} ? 0.0 + $a{commit_threshold} : 0.75),
+        # Initial release handling
+        ignore_initial_release => exists $a{ignore_initial_release} ? !!$a{ignore_initial_release} : 1,
         # symbols
         sym_press           => defined $a{sym_press}           ? $a{sym_press}                 : '.',
         sym_release         => defined $a{sym_release}         ? $a{sym_release}               : '~',
@@ -71,6 +73,8 @@ sub new {
         _first_event_t      => undef,
         _last_event_t       => undef,
         _last_debug_line    => undef,
+        _last_obs_key       => undef,
+        _expecting_press    => 1,  # Start expecting a press (ignore initial release)
     }, $class);
 
     $self->{quantum_s} = $self->{quantum_ms} / 1000.0;
@@ -94,6 +98,7 @@ sub reset {
     $self->{_last_event_t}  = undef;
     $self->{_last_debug_line} = undef;
     $self->{_last_obs_key} = undef;
+    $self->{_expecting_press} = 1;  # Reset to expecting press
     # clear per-pattern peak_done each fresh observation
     for my $p (@{$self->{patterns}}) { $p->{_peak_done} = 0.0; $p->{_ever_done} = 0; }
 }
@@ -107,6 +112,21 @@ sub tick    { my ($self, $t) = @_; $self->_evaluate_if_ready(defined $t ? $t : t
 
 sub _edge {
     my ($self, $kind, $t) = @_;
+    
+    # Ignore initial release if configured
+    if ($self->{ignore_initial_release} && $self->{_expecting_press} && $kind eq 'release') {
+        # Silently ignore this release - we're waiting for a press to start
+        if ($self->{verbose} >= 2) {
+            print "[Ignoring initial release - waiting for press]\n";
+        }
+        return;
+    }
+    
+    # First press marks the start of valid gesture tracking
+    if ($kind eq 'press') {
+        $self->{_expecting_press} = 0;  # Now accepting all events
+    }
+    
     push @{$self->{_events}}, [$kind, $t];
     $self->{_first_event_t} //= $t;
     $self->{_last_event_t}    = $t;
@@ -509,13 +529,13 @@ sub _evaluate_if_ready {
         
         # Only timeout if no viable dot patterns during active press
         if (!$has_viable_dot_pattern) {
-            $self->_no_match($t);
+            $self->_no_match($t, 'idle_timeout');
             return;
         }
     }
     
     if ($self->{hard_stop_span_s} && $span_s >= $self->{hard_stop_span_s}) {
-        $self->_no_match($t);
+        $self->_no_match($t, 'span_timeout');
         return;
     }
 }
@@ -786,10 +806,18 @@ sub _commit {
 }
 
 sub _no_match {
-    my ($self, $t) = @_;
-    print sprintf("[t=+%.03fs] NO_MATCH (reset)\n",
-                  ($self->{_first_event_t} ? $t - $self->{_first_event_t} : 0.0)) if $self->{verbose};
-    $self->{callback}->('NO_MATCH', undef, { t_end => $t }) if $self->{callback};
+    my ($self, $t, $reason) = @_;
+    $reason //= 'timeout';  # Default reason
+    
+    print sprintf("[t=+%.03fs] NO_MATCH (reset: %s)\n",
+                  ($self->{_first_event_t} ? $t - $self->{_first_event_t} : 0.0),
+                  $reason) if $self->{verbose};
+    
+    $self->{callback}->('NO_MATCH', undef, { 
+        t_end => $t,
+        reason => $reason
+    }) if $self->{callback};
+    
     $self->reset();
 }
 

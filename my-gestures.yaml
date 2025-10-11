@@ -23,12 +23,12 @@ patterns:
       2: { type: press, variance: 1.815, weight: 1.000, samples: 9 }
   - id: mediumpress
     name: "mediumpress"
-    visual: ...........
+    visual: .................
     # visual_numeric: .{44.1}
     weight: 1.000
     description: "Medium press"
     runs:
-      0: { type: press, variance: 4.190, weight: 1.000, samples: 11 }
+      0: { type: press, variance: 8.190, weight: 1.000, samples: 11 }
   - id: longpress
     name: "longpress"
     visual: ............................................

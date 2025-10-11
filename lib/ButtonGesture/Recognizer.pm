@@ -41,6 +41,9 @@ sub new {
         hard_stop_span_s    => defined $a{hard_stop_span_s}    ? 0.0 + $a{hard_stop_span_s}    : 0.00,
         # UB patience tuning (global)
         patience            => defined $a{patience}            ? 0.0 + $a{patience}            : 1.00,
+        # Commit guard: block commit if any open UB ≥ threshold
+        open_guard          => exists $a{open_guard}           ? !!$a{open_guard}              : 1,
+        open_guard_threshold=> defined $a{open_guard_threshold}? 0.0 + $a{open_guard_threshold} : undef,
         # DONE detection (NEW)
         done_k_sigma        => defined $a{done_k_sigma}        ? 0.0 + $a{done_k_sigma}        : 1.00,
         # UB peak turnover sensitivity (in weighted-score space)
@@ -331,46 +334,25 @@ sub _evaluate_if_ready {
     }
 
     if ($best_done_idx >= 0 && $best_done_score >= $threshold) {
-        my $ub_competitors = 0.0;
-        for my $j (0 .. $#{$self->{patterns}}) {
-            next if $j == $best_done_idx;
-            my $q = $self->{patterns}[$j];
-            next unless _runs_prefix($obs_runs, $q->{runs});
-            next if @$obs_runs >= @{$q->{runs}} && $self->_pattern_is_done($obs_runs, $q, $last_kind);
-            my ($ub_raw_j, undef) = _prefix_ub_with_perrun($obs_runs, $q);
-            my $ub_w_j = ($ub_raw_j * ($q->{weight} // 1.0)) * $patience;
-            $ub_competitors = $ub_w_j if $ub_w_j > $ub_competitors;
-        }
+        # GUARD: if any open candidate's UB (weighted) is already ≥ threshold, do NOT commit yet.
+        my $guard_th = defined $self->{open_guard_threshold} ? $self->{open_guard_threshold} : $threshold;
+        my $guard_block = ($self->{open_guard} && $best_ub_w >= $guard_th) ? 1 : 0;
 
-        if ($best_done_score >= $ub_competitors + $margin) {
-            my $name = $self->{patterns}[$best_done_idx]{name} // $self->{patterns}[$best_done_idx]{id} // "pattern_$best_done_idx";
-            $self->_commit($name, $best_done_score, $t);
-            return;
-        }
-    }
-    # -------------------------------------------------------------------------
-
-    # Early NO_MATCH when OPEN UB has turned over --------------
-    # If no DONE candidate can commit, and all FULL-ish are DONE/OVER,
-    # and the best OPEN UB has dropped below its own peak (by epsilon),
-    # and the current best OPEN UB is below threshold => nothing left → NO_MATCH.
-    my $all_full_done_or_over = 1;
-    for my $c (@full) { $all_full_done_or_over &&= $c->{is_done}; }
-
-    if ($best_done_idx < 0 && $all_full_done_or_over) {
-        my $eps = $self->{ub_peak_drop_epsilon} // 0.02;
-        my $peak_open = $best_open_peak_w;   # max stored peak among open
-        my $cur_open  = $best_ub_w;          # current best UB among open
-
-        if ($peak_open > 0) {
-            # Option A: turnover AND under threshold
-            if ($cur_open + $eps < $peak_open && $cur_open < $threshold) {
-                $self->_no_match($t);
-                return;
+        unless ($guard_block) {
+            my $ub_competitors = 0.0;
+            for my $j (0 .. $#{$self->{patterns}}) {
+                next if $j == $best_done_idx;
+                my $q = $self->{patterns}[$j];
+                next unless _runs_prefix($obs_runs, $q->{runs});
+                next if @$obs_runs >= @{$q->{runs}} && $self->_pattern_is_done($obs_runs, $q, $last_kind);
+                my ($ub_raw_j, undef) = _prefix_ub_with_perrun($obs_runs, $q);
+                my $ub_w_j = ($ub_raw_j * ($q->{weight} // 1.0)) * $patience;
+                $ub_competitors = $ub_w_j if $ub_w_j > $ub_competitors;
             }
-            # Option B: regardless of turnover, UB already under threshold
-            if ($cur_open < $threshold) {
-                $self->_no_match($t);
+
+            if ($best_done_score >= $ub_competitors + $margin) {
+                my $name = $self->{patterns}[$best_done_idx]{name} // $self->{patterns}[$best_done_idx]{id} // "pattern_$best_done_idx";
+                $self->_commit($name, $best_done_score, $t);
                 return;
             }
         }

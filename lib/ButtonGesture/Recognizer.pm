@@ -81,8 +81,8 @@ sub new {
 
     _precompute_patterns($self);
 
-    # init per-pattern peaks (DONE fit & OPEN UB)
-    for my $p (@{$self->{patterns}}) { $p->{_peak_done} = 0.0; $p->{_peak_bc_w} = 0.0; }
+    # init per-pattern peak_done
+    for my $p (@{$self->{patterns}}) { $p->{_peak_done} = 0.0; $p->{_ever_done} = 0; }
 
     return $self;
 }
@@ -93,8 +93,8 @@ sub reset {
     $self->{_first_event_t} = undef;
     $self->{_last_event_t}  = undef;
     $self->{_last_debug_line} = undef;
-    # clear per-pattern peaks each fresh observation
-    for my $p (@{$self->{patterns}}) { $p->{_peak_done} = 0.0; $p->{_peak_bc_w} = 0.0; }
+    # clear per-pattern peak_done each fresh observation
+    for my $p (@{$self->{patterns}}) { $p->{_peak_done} = 0.0; $p->{_ever_done} = 0; }
 }
 
 # -----------------------------------------------------------------------------
@@ -247,6 +247,7 @@ sub _evaluate_if_ready {
             # Peak-at-DONE: keep the best score reached at DONE moments only
             my $prev = $p->{_peak_done} // 0.0;
             $p->{_peak_done} = ($final > $prev) ? $final : $prev;
+            $p->{_ever_done} = 1;
         }
 
         push @full, {
@@ -286,19 +287,13 @@ sub _evaluate_if_ready {
 
     # UBs: consider any pattern that is a plausible supersequence of the observation prefix
     $best_ub_w = 0.0; $best_ub_raw = 0.0; $best_ub_idx = -1;
-    my $best_open_peak_w = 0.0;  # NEW: global max of stored peak UBs among open candidates
     for my $j (0 .. $#{$self->{patterns}}) {
         my $q = $self->{patterns}[$j];
-        next unless _runs_prefix($obs_runs, $q->{runs});            # symbol-prefix match
-        next if @$obs_runs >= @{$q->{runs}} && $self->_pattern_is_done($obs_runs, $q, $last_kind);
-        my ($ub_raw, undef) = _prefix_ub_with_perrun($obs_runs, $q);# optimistic suffix
+        # RELAXED: allow equal-length (LAST) patterns too; skip only if that pattern is already DONE
+        next unless _runs_prefix_relaxed($obs_runs, $q->{runs});    # symbol-prefix (<= length) match
+        next if (@$obs_runs == @{$q->{runs}} && $self->_pattern_is_done($obs_runs, $q, $last_kind));
+        my ($ub_raw, undef) = _prefix_ub_with_perrun($obs_runs, $q); # optimistic suffix gated by current run
         my $ub_w = $ub_raw * ($q->{weight} // 1.0);
-
-        # track per-pattern and global peak UB (weighted)
-        my $prev_peak = $q->{_peak_bc_w} // 0.0;
-        if ($ub_w > $prev_peak) { $q->{_peak_bc_w} = $ub_w; }
-        $best_open_peak_w = $q->{_peak_bc_w} if $q->{_peak_bc_w} > $best_open_peak_w;
-
         if ($ub_w > $best_ub_w)    { $best_ub_w   = $ub_w;  }
         if ($ub_raw > $best_ub_raw){ $best_ub_raw = $ub_raw; $best_ub_idx = $j; }
     }
@@ -334,27 +329,22 @@ sub _evaluate_if_ready {
     }
 
     if ($best_done_idx >= 0 && $best_done_score >= $threshold) {
-        # GUARD: if any open candidate's UB (weighted) is already ≥ threshold, do NOT commit yet.
-        my $guard_th = defined $self->{open_guard_threshold} ? $self->{open_guard_threshold} : $threshold;
-        my $guard_block = ($self->{open_guard} && $best_ub_w >= $guard_th) ? 1 : 0;
+        my $ub_competitors = 0.0;
+        for my $j (0 .. $#{$self->{patterns}}) {
+            next if $j == $best_done_idx;
+            my $q = $self->{patterns}[$j];
+            # RELAXED: include LAST patterns that are not done yet
+            next unless _runs_prefix_relaxed($obs_runs, $q->{runs});
+            next if (@$obs_runs == @{$q->{runs}} && $self->_pattern_is_done($obs_runs, $q, $last_kind));
+            my ($ub_raw_j, undef) = _prefix_ub_with_perrun($obs_runs, $q);
+            my $ub_w_j = ($ub_raw_j * ($q->{weight} // 1.0)) * $patience;
+            $ub_competitors = $ub_w_j if $ub_w_j > $ub_competitors;
+        }
 
-        unless ($guard_block) {
-            my $ub_competitors = 0.0;
-            for my $j (0 .. $#{$self->{patterns}}) {
-                next if $j == $best_done_idx;
-                my $q = $self->{patterns}[$j];
-                next unless _runs_prefix($obs_runs, $q->{runs});
-                next if @$obs_runs >= @{$q->{runs}} && $self->_pattern_is_done($obs_runs, $q, $last_kind);
-                my ($ub_raw_j, undef) = _prefix_ub_with_perrun($obs_runs, $q);
-                my $ub_w_j = ($ub_raw_j * ($q->{weight} // 1.0)) * $patience;
-                $ub_competitors = $ub_w_j if $ub_w_j > $ub_competitors;
-            }
-
-            if ($best_done_score >= $ub_competitors + $margin) {
-                my $name = $self->{patterns}[$best_done_idx]{name} // $self->{patterns}[$best_done_idx]{id} // "pattern_$best_done_idx";
-                $self->_commit($name, $best_done_score, $t);
-                return;
-            }
+        if ($best_done_score >= $ub_competitors + $margin) {
+            my $name = $self->{patterns}[$best_done_idx]{name} // $self->{patterns}[$best_done_idx]{id} // "pattern_$best_done_idx";
+            $self->_commit($name, $best_done_score, $t);
+            return;
         }
     }
     # -------------------------------------------------------------------------
@@ -532,6 +522,17 @@ sub _runs_prefix {
     return 1;
 }
 
+# RELAXED prefix: allow equal-length (used for LAST patterns still in play)
+sub _runs_prefix_relaxed {
+    my ($a_ref, $b_ref) = @_;
+    my $n = scalar(@$a_ref);
+    return 0 unless scalar(@$b_ref) >= $n;  # allow equal length
+    for my $i (0..$n-1) {
+        return 0 unless ($a_ref->[$i]{sym} // '') eq ($b_ref->[$i]{sym} // '');
+    }
+    return 1;
+}
+
 sub _commit {
     my ($self, $name, $score, $t) = @_;
     print sprintf("[t=+%.03fs] TRIGGERED: %s (score: %.3f)\n",
@@ -620,8 +621,11 @@ sub _facet_rel_label {
     my ($self, $obs_runs, $p, $is_done) = @_;
     my $Lobs = scalar(@$obs_runs);
     my $Lpat = $p->{runs_count} // scalar(@{$p->{runs}});
-    return 'REL:DONE'  if $is_done && $Lobs == $Lpat;
-    return 'REL:OVER'  if $is_done && $Lobs  > $Lpat;
+    # If this pattern was ever done earlier, reflect that stably in the facet.
+    if ($p->{_ever_done}) {
+        return 'REL:OVER' if $Lobs > $Lpat;
+        return 'REL:DONE';
+    }
     return 'REL:LAST'  if $Lobs >= $Lpat;                    # in final run but not done
     return sprintf('REL:PART %d/%d', $Lobs, $Lpat);          # prefix coverage only
 }

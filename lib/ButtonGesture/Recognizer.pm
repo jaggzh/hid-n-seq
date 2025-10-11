@@ -562,7 +562,8 @@ sub _prefix_ub_with_perrun {
         $sim_prefix[$i] = $s;
     }
 
-    # current open run (salvage-aware)
+    # current open run (salvage-aware) - gates the suffix
+    my $g = 1.0;  # Salvageability gate for suffix
     if ($K >= 1) {
         my $i  = $K-1;
         if (my $r = $qruns->[$i]) {
@@ -578,13 +579,16 @@ sub _prefix_ub_with_perrun {
             $acc  += $w * $s_feasible;
             $w_sum+= $w;
             $sim_prefix[$i] = $s_feasible;
+            
+            # Gate suffix by current run's salvageability
+            $g = $s_feasible;
         }
     }
 
-    # suffix: assume perfect
+    # suffix: gated by current run salvageability (not perfect 1.0!)
     for my $i ($K..$#$qruns) {
         my $w = 0.0 + ($qruns->[$i]{weight} // 1.0);
-        $acc  += $w * 1.0;
+        $acc  += $w * $g;  # <-- Changed from 1.0 to $g
         $w_sum+= $w;
     }
 

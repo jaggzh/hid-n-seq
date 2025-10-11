@@ -43,6 +43,8 @@ sub new {
         patience            => defined $a{patience}            ? 0.0 + $a{patience}            : 1.00,
         # DONE detection (NEW)
         done_k_sigma        => defined $a{done_k_sigma}        ? 0.0 + $a{done_k_sigma}        : 1.00,
+        # UB peak turnover sensitivity (in weighted-score space)
+        ub_peak_drop_epsilon=> defined $a{ub_peak_drop_epsilon}? 0.0 + $a{ub_peak_drop_epsilon}: 0.02,
         # symbols
         sym_press           => defined $a{sym_press}           ? $a{sym_press}                 : '.',
         sym_release         => defined $a{sym_release}         ? $a{sym_release}               : '~',
@@ -76,8 +78,8 @@ sub new {
 
     _precompute_patterns($self);
 
-    # NEW: init per-pattern peak_done
-    for my $p (@{$self->{patterns}}) { $p->{_peak_done} = 0.0; }
+    # init per-pattern peaks (DONE fit & OPEN UB)
+    for my $p (@{$self->{patterns}}) { $p->{_peak_done} = 0.0; $p->{_peak_bc_w} = 0.0; }
 
     return $self;
 }
@@ -88,8 +90,8 @@ sub reset {
     $self->{_first_event_t} = undef;
     $self->{_last_event_t}  = undef;
     $self->{_last_debug_line} = undef;
-    # clear per-pattern peak_done each fresh observation
-    for my $p (@{$self->{patterns}}) { $p->{_peak_done} = 0.0; }
+    # clear per-pattern peaks each fresh observation
+    for my $p (@{$self->{patterns}}) { $p->{_peak_done} = 0.0; $p->{_peak_bc_w} = 0.0; }
 }
 
 # -----------------------------------------------------------------------------
@@ -281,12 +283,19 @@ sub _evaluate_if_ready {
 
     # UBs: consider any pattern that is a plausible supersequence of the observation prefix
     $best_ub_w = 0.0; $best_ub_raw = 0.0; $best_ub_idx = -1;
+    my $best_open_peak_w = 0.0;  # NEW: global max of stored peak UBs among open candidates
     for my $j (0 .. $#{$self->{patterns}}) {
         my $q = $self->{patterns}[$j];
         next unless _runs_prefix($obs_runs, $q->{runs});            # symbol-prefix match
         next if @$obs_runs >= @{$q->{runs}} && $self->_pattern_is_done($obs_runs, $q, $last_kind);
         my ($ub_raw, undef) = _prefix_ub_with_perrun($obs_runs, $q);# optimistic suffix
         my $ub_w = $ub_raw * ($q->{weight} // 1.0);
+
+        # track per-pattern and global peak UB (weighted)
+        my $prev_peak = $q->{_peak_bc_w} // 0.0;
+        if ($ub_w > $prev_peak) { $q->{_peak_bc_w} = $ub_w; }
+        $best_open_peak_w = $q->{_peak_bc_w} if $q->{_peak_bc_w} > $best_open_peak_w;
+
         if ($ub_w > $best_ub_w)    { $best_ub_w   = $ub_w;  }
         if ($ub_raw > $best_ub_raw){ $best_ub_raw = $ub_raw; $best_ub_idx = $j; }
     }
@@ -306,7 +315,7 @@ sub _evaluate_if_ready {
         }
     }
 
-    # --------- NEW: Peak-DONE decision ---------------------------------------
+    # --------- Peak-DONE decision ---------------------------------------
     # Choose best DONE by peak; compare against max UB of others (with patience)
     my $threshold  = $self->{commit_threshold};
     my $margin     = $self->{commit_margin};
@@ -337,6 +346,33 @@ sub _evaluate_if_ready {
             my $name = $self->{patterns}[$best_done_idx]{name} // $self->{patterns}[$best_done_idx]{id} // "pattern_$best_done_idx";
             $self->_commit($name, $best_done_score, $t);
             return;
+        }
+    }
+    # -------------------------------------------------------------------------
+
+    # Early NO_MATCH when OPEN UB has turned over --------------
+    # If no DONE candidate can commit, and all FULL-ish are DONE/OVER,
+    # and the best OPEN UB has dropped below its own peak (by epsilon),
+    # and the current best OPEN UB is below threshold => nothing left → NO_MATCH.
+    my $all_full_done_or_over = 1;
+    for my $c (@full) { $all_full_done_or_over &&= $c->{is_done}; }
+
+    if ($best_done_idx < 0 && $all_full_done_or_over) {
+        my $eps = $self->{ub_peak_drop_epsilon} // 0.02;
+        my $peak_open = $best_open_peak_w;   # max stored peak among open
+        my $cur_open  = $best_ub_w;          # current best UB among open
+
+        if ($peak_open > 0) {
+            # Option A: turnover AND under threshold
+            if ($cur_open + $eps < $peak_open && $cur_open < $threshold) {
+                $self->_no_match($t);
+                return;
+            }
+            # Option B: regardless of turnover, UB already under threshold
+            if ($cur_open < $threshold) {
+                $self->_no_match($t);
+                return;
+            }
         }
     }
     # -------------------------------------------------------------------------

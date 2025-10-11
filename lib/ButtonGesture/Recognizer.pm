@@ -359,6 +359,14 @@ sub _evaluate_if_ready {
     for my $c (@full) {
         my $p = $self->{patterns}[$c->{idx}];
         
+        if ($self->{verbose} >= 2 && $c->{name} eq 'click') {
+            printf("[DEBUG] Checking click: invalidated=%s obs_runs=%d pat_runs=%d is_done=%s peak_done=%.3f\n",
+                   ($c->{invalidated} ? 'YES' : 'NO'),
+                   scalar(@$obs_runs), scalar(@{$p->{runs}}),
+                   ($c->{is_done} ? 'YES' : 'NO'),
+                   $c->{peak_done});
+        }
+        
         # Skip invalidated patterns
         next if $c->{invalidated};
         
@@ -373,6 +381,11 @@ sub _evaluate_if_ready {
             $best_done_score = $c->{peak_done};
             $best_done_idx   = $c->{idx};
         }
+    }
+
+    if ($self->{verbose} >= 2) {
+        printf("[DEBUG] best_done_idx=%d best_done_score=%.3f threshold=%.3f\n",
+               $best_done_idx, $best_done_score, $threshold);
     }
 
     if ($best_done_idx >= 0 && $best_done_score >= $threshold) {
@@ -395,6 +408,11 @@ sub _evaluate_if_ready {
             
             my $ub_w_j = ($ub_raw_j * ($q->{weight} // 1.0)) * $patience;
             $ub_competitors = $ub_w_j if $ub_w_j > $ub_competitors;
+        }
+
+        if ($self->{verbose} >= 2) {
+            printf("[DEBUG] ub_competitors=%.3f patience=%.3f\n",
+                   $ub_competitors, $patience);
         }
 
 		if (1) {
@@ -434,9 +452,20 @@ sub _evaluate_if_ready {
 				$hold_max = $val if $val > $hold_max;
 			}
 
+			if ($self->{verbose} >= 2) {
+				printf("[DEBUG] superset hold_max=%.3f hold_th=%.3f (blocking=%s)\n",
+					   $hold_max, $hold_th, ($hold_max >= $hold_th ? "YES" : "NO"));
+			}
+
 			# If a strict superset still has enough headroom, wait.
 			return if $hold_max >= $hold_th;
 		}
+
+        if ($self->{verbose} >= 2) {
+            printf("[DEBUG] Final check: %.3f >= %.3f + %.3f? (%s)\n",
+                   $best_done_score, $ub_competitors, $margin,
+                   ($best_done_score >= $ub_competitors + $margin ? "YES->COMMIT" : "NO->WAIT"));
+        }
 
         if ($best_done_score >= $ub_competitors + $margin) {
             my $name = $self->{patterns}[$best_done_idx]{name} // $self->{patterns}[$best_done_idx]{id} // "pattern_$best_done_idx";
@@ -909,8 +938,11 @@ sub _debug_dump_candidates {
             $ub_str = sprintf(" UB=%.3f", $ub_w);
         }
         
-        printf("  %-14s %-12s %s  score=%.3f  w=%.2f%s  pat=\"%s\"\n",
-               $c->{name}, $rel, $usr_label, $c->{score}, ($p->{weight}//1.0), $ub_str, $pat);
+        # Add invalidation marker
+        my $inv_marker = $c->{invalidated} ? ' INV' : '';
+        
+        printf("  %-14s %-12s %s  score=%.3f  w=%.2f%s%s  pat=\"%s\"\n",
+               $c->{name}, $rel, $usr_label, $c->{score}, ($p->{weight}//1.0), $ub_str, $inv_marker, $pat);
     }
 
     # UB rows: strict supersequences of observation prefix

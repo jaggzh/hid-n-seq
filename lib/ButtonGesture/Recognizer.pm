@@ -371,7 +371,11 @@ sub _evaluate_if_ready {
         next if $c->{invalidated};
         
         # INVALIDATION: Skip patterns where observation has exceeded pattern length
-        next if @$obs_runs > @{$p->{runs}};
+        # BUT: allow dot-ended patterns with one extra release run (DONE signal)
+        my $pattern_ends_with_press = ($p->{runs}[-1]{sym} eq $self->{sym_press});
+        my $obs_is_just_release_after = (@$obs_runs == @{$p->{runs}} + 1 && 
+                                          $obs_runs->[-1]{sym} eq $self->{sym_release});
+        next if @$obs_runs > @{$p->{runs}} && !($pattern_ends_with_press && $obs_is_just_release_after);
         
         # Only consider patterns that are actually DONE and meet threshold
         next unless $c->{is_done};
@@ -916,7 +920,7 @@ sub _debug_dump_observation {
 sub _debug_dump_candidates {
     my ($self, $obs_runs, $full_ref, $best_ub_w, $dt) = @_;
     my $usr = $self->_viz_pattern_str($obs_runs, 1);
-    printf("%67s usr=\"%s\"\n", '', $usr);
+    printf("%63s usr=\"%s\"\n", '', $usr);
 
     my $usr_label = $self->_facet_usr_label();
 

@@ -36,7 +36,7 @@ patterns:
     weight: 1.000
     description: "Longpress"
     runs:
-      0: { type: press, variance: 3.190, weight: 1.000, samples: 11 }
+      0: { type: press, variance: 10.190, weight: 1.000, samples: 11 }
   # - id: click-gap-doubleclick
   #   name: "click-gap-doubleclick"
   #   visual: .......~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~........~~~~~~~~~.......

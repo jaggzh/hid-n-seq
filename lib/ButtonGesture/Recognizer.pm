@@ -6,6 +6,7 @@ use Time::HiRes qw(time);
 use List::Util qw(sum min max);
 use Term::ReadKey;
 use Data::Dumper;
+use Digest::MD5 qw(md5);
 
 # ----------------------------------------------------------------------------
 # Recognizer.pm  — variance-driven scoring + patience-weighted UBs
@@ -57,11 +58,44 @@ sub new {
         viz_enable          => exists $a{viz_enable}           ? !!$a{viz_enable}              : 1,
         verbose             => defined $a{verbose}             ? 0 + $a{verbose}               : 1,
         viz_symbols         => $a{viz_symbols} // { '.' => '▉', '~' => '▂' },
+        viz_symbol_release  => { '.' => '▊' },
         viz_show_colors     => exists $a{viz_show_colors} ? !!$a{viz_show_colors} : 1,
         viz_scale           => defined $a{viz_scale} ? 0.0 + $a{viz_scale} : 1.0,
         viz_abbrev_max      => defined $a{viz_abbrev_max} ? 0 + $a{viz_abbrev_max} : 120,
-        viz_user_bg_rgb     => $a{viz_user_bg_rgb} // [ 38, 38, 38 ],
-        viz_pat_bg_rgb      => $a{viz_pat_bg_rgb}  // [ 25, 25, 25 ],
+        viz_user_bg_rgb     => $a{viz_user_bg_rgb} // [ 18, 18, 18 ],
+        viz_pat_bg_rgb      => $a{viz_pat_bg_rgb}  // [ 10, 10, 10 ],
+        # Color gradient thresholds for run accuracy visualization
+        # viz_gradient_thresholds => $a{viz_gradient_thresholds} // [
+        #     { min => 0.97, color => [100, 255, 100] },  # bright green
+        #     { min => 0.90, color => [50, 220, 50] },    # green
+        #     { min => 0.80, color => [255, 255, 0] },    # yellow
+        #     { min => 0.65, color => [255, 165, 0] },    # orange
+        #     { min => 0.00, color => [255, 50, 50] },    # red
+        # ],
+        viz_gradient_thresholds => $a{viz_gradient_thresholds} // [
+            { min => 0.97, color => [255, 255, 200] },  # faded yellow
+            { min => 0.80, color => [225, 255, 225] },  # green
+            { min => 0.00, color => [0, 80, 0] },    # dark green
+        ],
+        # Pattern background color settings
+        viz_pattern_bg_saturation_range => $a{viz_pattern_bg_saturation_range} // [0.80, 1.00],
+        viz_pattern_bg_brightness_range => $a{viz_pattern_bg_brightness_range} // [0.20, 0.30],
+        # Display toggles
+        viz_display => {
+            name => 1,
+            rel_label => 1,
+            usr_label => 0,  # Now shown on OBS line by default
+            score => 1,
+            weight => 1,
+            type => 1,
+            quotes => 1,
+            %{$a{viz_display} // {}},
+        },
+        # Default colors (explicit, no \e[0m)
+        viz_default_fg => $a{viz_default_fg} // [200, 200, 200],
+        viz_default_bg => $a{viz_default_bg} // [0, 0, 0],
+        # Release edge highlight color (magenta)
+        viz_release_edge_bg => $a{viz_release_edge_bg} // [255, 80, 255],
         # defaults if pattern-run variance/weight missing
         default_var_press   => defined $a{default_var_press}   ? 0.0 + $a{default_var_press}   : 1.0,
         default_var_release => defined $a{default_var_release} ? 0.0 + $a{default_var_release} : 2.0,
@@ -79,9 +113,16 @@ sub new {
 
     $self->{quantum_s} = $self->{quantum_ms} / 1000.0;
 
-    # VIS: precompute ANSI backgrounds
+    # VIS: precompute default colors
+    $self->{_viz_default_fg_ansi} = _ansi_rgb(@{$self->{viz_default_fg}});
+    $self->{_viz_default_bg_ansi} = _ansi_bg(@{$self->{viz_default_bg}});
+    $self->{_viz_reset} = $self->{_viz_default_fg_ansi} . $self->{_viz_default_bg_ansi};
+
+    # VIS: precompute release edge bg
+    $self->{_viz_release_edge_bg_ansi} = _ansi_bg(@{$self->{viz_release_edge_bg}});
+
+    # VIS: precompute user bg (kept for compatibility)
     $self->{_viz_user_bg} = _ansi_bg(@{$self->{viz_user_bg_rgb}});
-    $self->{_viz_pat_bg}  = _ansi_bg(@{$self->{viz_pat_bg_rgb}});
 
     _precompute_patterns($self);
 
@@ -103,6 +144,19 @@ sub reset {
     for my $p (@{$self->{patterns}}) { $p->{_peak_done} = 0.0; $p->{_ever_done} = 0; }
 }
 
+# Runtime display toggle
+sub viz_set_display {
+    my ($self, %opts) = @_;
+    if (exists $opts{text}) {
+        my $v = !!$opts{text};
+        $self->{viz_display}{$_} = $v for qw(name rel_label usr_label score weight type);
+    }
+    for my $k (keys %opts) {
+        next if $k eq 'text';
+        $self->{viz_display}{$k} = !!$opts{$k} if exists $self->{viz_display}{$k};
+    }
+}
+
 # -----------------------------------------------------------------------------
 # External interface: feed edges and ticks
 # -----------------------------------------------------------------------------
@@ -112,7 +166,7 @@ sub tick    { my ($self, $t) = @_; $self->_evaluate_if_ready(defined $t ? $t : t
 
 sub _edge {
     my ($self, $kind, $t) = @_;
-    
+
     # Ignore initial release if configured
     if ($self->{ignore_initial_release} && $self->{_expecting_press} && $kind eq 'release') {
         # Silently ignore this release - we're waiting for a press to start
@@ -121,12 +175,12 @@ sub _edge {
         }
         return;
     }
-    
+
     # First press marks the start of valid gesture tracking
     if ($kind eq 'press') {
         $self->{_expecting_press} = 0;  # Now accepting all events
     }
-    
+
     push @{$self->{_events}}, [$kind, $t];
     $self->{_first_event_t} //= $t;
     $self->{_last_event_t}    = $t;
@@ -177,6 +231,9 @@ sub _precompute_patterns {
         $p->{runs_count}    = scalar(@{$p->{runs}});
         # per-pattern cached transition bonus weight (allows per-pattern override later)
         $p->{_edge_bonus_weight} = (defined $p->{edge_bonus_weight} ? 0.0 + $p->{edge_bonus_weight} : $self->{edge_bonus_weight});
+
+        # Generate unique background color for this pattern based on name hash
+        $p->{_viz_bg_ansi} = $self->_pattern_bg_color($p->{name} // $p->{id} // '');
     }
 }
 
@@ -270,7 +327,7 @@ sub _evaluate_if_ready {
         # INVALIDATION: obs exceeds pattern length
         # BUT: if pattern ends with press (dot), and obs is pattern+1 with final release, that's OK (it's the DONE signal)
         my $pattern_ends_with_press = ($p->{runs}[-1]{sym} eq $self->{sym_press});
-        my $obs_is_just_release_after = (@$obs_runs == @{$p->{runs}} + 1 && 
+        my $obs_is_just_release_after = (@$obs_runs == @{$p->{runs}} + 1 &&
                                           $obs_runs->[-1]{sym} eq $self->{sym_release});
 
         if (@$obs_runs > @{$p->{runs}} && !($pattern_ends_with_press && $obs_is_just_release_after)) {
@@ -378,7 +435,7 @@ sub _evaluate_if_ready {
     my $best_done_score = 0.0;
     for my $c (@full) {
         my $p = $self->{patterns}[$c->{idx}];
-        
+
         if ($self->{verbose} >= 2 && $c->{name} eq 'click') {
             printf("[DEBUG] Checking click: invalidated=%s obs_runs=%d pat_runs=%d is_done=%s peak_done=%.3f\n",
                    ($c->{invalidated} ? 'YES' : 'NO'),
@@ -386,21 +443,21 @@ sub _evaluate_if_ready {
                    ($c->{is_done} ? 'YES' : 'NO'),
                    $c->{peak_done});
         }
-        
+
         # Skip invalidated patterns
         next if $c->{invalidated};
-        
+
         # INVALIDATION: Skip patterns where observation has exceeded pattern length
         # BUT: allow dot-ended patterns with one extra release run (DONE signal)
         my $pattern_ends_with_press = ($p->{runs}[-1]{sym} eq $self->{sym_press});
-        my $obs_is_just_release_after = (@$obs_runs == @{$p->{runs}} + 1 && 
+        my $obs_is_just_release_after = (@$obs_runs == @{$p->{runs}} + 1 &&
                                           $obs_runs->[-1]{sym} eq $self->{sym_release});
         next if @$obs_runs > @{$p->{runs}} && !($pattern_ends_with_press && $obs_is_just_release_after);
-        
+
         # Only consider patterns that are actually DONE and meet threshold
         next unless $c->{is_done};
         next unless $c->{peak_done} >= $threshold;
-        
+
         if ($c->{peak_done} > $best_done_score) {
             $best_done_score = $c->{peak_done};
             $best_done_idx   = $c->{idx};
@@ -419,17 +476,17 @@ sub _evaluate_if_ready {
         for my $j (0 .. $#{$self->{patterns}}) {
             next if $j == $best_done_idx;
             my $q = $self->{patterns}[$j];
-            
+
             # INVALIDATION: Skip patterns we've already exceeded
             next if @$obs_runs > @{$q->{runs}};
-            
+
             next unless _runs_prefix($obs_runs, $q->{runs});
             next if @$obs_runs >= @{$q->{runs}} && $self->_pattern_is_done($obs_runs, $q, $last_kind);
             my ($ub_raw_j, undef) = _prefix_ub_with_perrun($obs_runs, $q);
-            
+
             # INVALIDATION by UB: If UB is below threshold, pattern has failed
             next if $ub_raw_j < $threshold;
-            
+
             my $ub_w_j = ($ub_raw_j * ($q->{weight} // 1.0)) * $patience;
             $ub_competitors = $ub_w_j if $ub_w_j > $ub_competitors;
         }
@@ -448,19 +505,19 @@ sub _evaluate_if_ready {
             for my $j (0 .. $#{$self->{patterns}}) {
                 next if $j == $best_done_idx;
                 my $q = $self->{patterns}[$j];
-                
+
                 # INVALIDATION: Skip if obs exceeds this pattern
                 next if @$obs_runs > @{$q->{runs}};
-                
+
                 next unless _is_strict_superset($q, $p_best);
 
                 my $val = 0.0;
                 if (@$obs_runs < @{$q->{runs}}) {
                     my ($ub_raw_j, undef) = _prefix_ub_with_perrun($obs_runs, $q);
-                    
+
                     # INVALIDATION by UB: If UB below threshold, pattern has failed
                     next if $ub_raw_j < $threshold;
-                    
+
                     $val = $ub_raw_j * ($q->{weight} // 1.0);
                 } else {
                     # If already FULL for q, use its current weighted score (or recompute) as a conservative competitor
@@ -515,7 +572,7 @@ sub _evaluate_if_ready {
                     next if $c->{invalidated};
                     my $p = $self->{patterns}[$c->{idx}];
                     next if @$obs_runs > @{$p->{runs}};  # Skip exceeded patterns
-                    
+
                     # Check if pattern ends with press and has viable score/UB
                     if (($p->{runs}[-1]{sym} // '') eq $self->{sym_press}) {
                         if ($c->{score} >= $threshold || $c->{is_done}) {
@@ -526,14 +583,14 @@ sub _evaluate_if_ready {
                 }
             }
         }
-        
+
         # Only timeout if no viable dot patterns during active press
         if (!$has_viable_dot_pattern) {
             $self->_no_match($t, 'idle_timeout');
             return;
         }
     }
-    
+
     if ($self->{hard_stop_span_s} && $span_s >= $self->{hard_stop_span_s}) {
         $self->_no_match($t, 'span_timeout');
         return;
@@ -559,12 +616,12 @@ sub _full_score_variance {
     for my $i (0..$L-1) {
         my $r  = $pruns->[$i];
         my $or = $obs_runs->[$i];
-        
+
         # CRITICAL: Symbol mismatch means zero score
         if (($r->{sym} // '') ne ($or->{sym} // '')) {
             return (0.0, []);
         }
-        
+
         my $mu = 0.0 + ($r->{len}      // 1);
         my $sd = 0.0 + ($r->{variance} // 1.0);
         my $w  = 0.0 + ($r->{weight}   // 1.0);
@@ -665,7 +722,7 @@ sub _prefix_ub_with_perrun {
             $acc  += $w * $s_feasible;
             $w_sum+= $w;
             $sim_prefix[$i] = $s_feasible;
-            
+
             # Gate suffix by current run's salvageability
             $g = $s_feasible;
         }
@@ -808,38 +865,78 @@ sub _commit {
 sub _no_match {
     my ($self, $t, $reason) = @_;
     $reason //= 'timeout';  # Default reason
-    
+
     print sprintf("[t=+%.03fs] NO_MATCH (reset: %s)\n",
                   ($self->{_first_event_t} ? $t - $self->{_first_event_t} : 0.0),
                   $reason) if $self->{verbose};
-    
-    $self->{callback}->('NO_MATCH', undef, { 
+
+    $self->{callback}->('NO_MATCH', undef, {
         t_end => $t,
         reason => $reason
     }) if $self->{callback};
-    
+
     $self->reset();
 }
 
-# ----------------------------------------------------------------------------- 
-# Visualization helpers (colors, backgrounds, abbreviated renderings)  (NEW)
+# -----------------------------------------------------------------------------
+# Visualization helpers (colors, backgrounds, abbreviated renderings)
 # -----------------------------------------------------------------------------
 sub _ansi_rgb   { return sprintf("\e[38;2;%d;%d;%dm", $_[0], $_[1], $_[2]); }
 sub _ansi_bg    { return sprintf("\e[48;2;%d;%d;%dm", $_[0], $_[1], $_[2]); }
 sub _ansi_dim   { "\e[2m" }
-sub _ansi_reset { return "\e[0m"; }
 
-# pen==0 → near-white; higher pen → darker base color per symbol family
-sub _fg_for_pen {
-    my ($sym, $pen) = @_;
-    my $alpha = 1.0 / (1.0 + ($pen // 0));         # (0,1], 0-pen ~ near-white
-    my ($r1,$g1,$b1,$r2,$g2,$b2);
-    if ($sym eq '~') { ($r1,$g1,$b1) = (220,220,255); ($r2,$g2,$b2) = (0,0,120);  }
-    else             { ($r1,$g1,$b1) = (220,255,220); ($r2,$g2,$b2) = (0,80,0);   }
-    my $r = int($r2 + ($r1 - $r2) * $alpha + 0.5);
-    my $g = int($g2 + ($g1 - $g2) * $alpha + 0.5);
-    my $b = int($b2 + ($b1 - $b2) * $alpha + 0.5);
-    return _ansi_rgb($r,$g,$b);
+# Generate pattern background color from name hash
+sub _pattern_bg_color {
+    my ($self, $name) = @_;
+
+    # Hash the name to get consistent color
+    my $hash = unpack('N', md5($name));
+
+    # Extract values from hash
+    my $hue = ($hash & 0xFFFF) / 0xFFFF;  # 0-1
+
+    # Get configured ranges
+    my ($sat_min, $sat_max) = @{$self->{viz_pattern_bg_saturation_range}};
+    my ($bri_min, $bri_max) = @{$self->{viz_pattern_bg_brightness_range}};
+
+    # Map to configured saturation and brightness ranges
+    my $sat = $sat_min + (($hash >> 16) & 0xFF) / 255.0 * ($sat_max - $sat_min);
+    my $bri = $bri_min + (($hash >> 8) & 0xFF) / 255.0 * ($bri_max - $bri_min);
+
+    # Convert HSV to RGB
+    my ($r, $g, $b) = _hsv_to_rgb($hue, $sat, $bri);
+
+    return _ansi_bg($r, $g, $b);
+}
+
+# HSV to RGB conversion
+sub _hsv_to_rgb {
+    my ($h, $s, $v) = @_;
+
+    my $c = $v * $s;
+    my $x = $c * (1 - abs(($h * 6) % 2 - 1));
+    my $m = $v - $c;
+
+    my ($r1, $g1, $b1);
+    if ($h < 1/6) {
+        ($r1, $g1, $b1) = ($c, $x, 0);
+    } elsif ($h < 2/6) {
+        ($r1, $g1, $b1) = ($x, $c, 0);
+    } elsif ($h < 3/6) {
+        ($r1, $g1, $b1) = (0, $c, $x);
+    } elsif ($h < 4/6) {
+        ($r1, $g1, $b1) = (0, $x, $c);
+    } elsif ($h < 5/6) {
+        ($r1, $g1, $b1) = ($x, 0, $c);
+    } else {
+        ($r1, $g1, $b1) = ($c, 0, $x);
+    }
+
+    my $r = int(($r1 + $m) * 255 + 0.5);
+    my $g = int(($g1 + $m) * 255 + 0.5);
+    my $b = int(($b1 + $m) * 255 + 0.5);
+
+    return ($r, $g, $b);
 }
 
 sub _render_len_chars {
@@ -849,35 +946,26 @@ sub _render_len_chars {
     return $tot;
 }
 
-# abbreviated runs with base bg; per-run no penalty coloring
-sub _viz_runs_abbrev {
-    my ($runs, $scale, $symbols, $bg, $max_chars) = @_;
-    my $s = $bg; my $count = 0;
-    for my $r (@$runs) {
-        my $ch = $symbols->{$r->{sym}} // $r->{sym};
-        my $n  = max(1, int(($r->{len}//1) * $scale + 0.5));
-        my $fg = _fg_for_pen($r->{sym}, 0);
-        for (my $i=0; $i<$n && $count<$max_chars; $i++) { $s .= $fg . $ch; $count++; }
-        last if $count >= $max_chars;
-    }
-    $s .= "…" if _render_len_chars($runs, $scale) > $max_chars;
-    return $s . _ansi_reset();
+# Convert similarity s∈[0,1] to a penalty 'pen' compatible with coloring
+sub _sim_to_pen {
+    my ($s) = @_;
+    return 999 if !defined $s || $s <= 0;
+    return 0   if $s >= 0.999999;
+    # s = exp(-0.5*z^2)  ⇒  z^2 = -2 ln s
+    my $z2 = -2.0 * log($s);
+    return $z2;
 }
 
-# full pattern with bg; flat color by symbol type
-sub _viz_pattern_str {
-    my ($self, $runs, $is_user) = @_;
-    my $scale   = $self->{viz_scale};
-    my $symbols = $self->{viz_symbols};
-    my $bg      = $is_user ? $self->{_viz_user_bg} : $self->{_viz_pat_bg};
-    my $s = $bg;
-    for my $r (@$runs) {
-        my $n  = max(1, int(($r->{len}//1) * $scale + 0.5));
-        my $ch = $symbols->{$r->{sym}} // $r->{sym};
-        my $fg = $self->{viz_show_colors} ? _fg_for_pen($r->{sym}, 0) : '';
-        $s .= $fg . ($ch x $n);
+# Build per-run info array (sym, pen, sim) for UB prefix
+sub _sim_prefix_to_perrun {
+    my ($p, $sim_prefix) = @_;
+    my @out;
+    for my $i (0..$#$sim_prefix) {
+        my $sym = $p->{runs}[$i]{sym};
+        my $sim = $sim_prefix->[$i];
+        push @out, { sym => $sym, pen => _sim_to_pen($sim), sim => $sim };
     }
-    return $s . _ansi_reset();
+    return \@out;
 }
 
 # Facet helpers for labeling: USR and REL
@@ -892,17 +980,17 @@ sub _facet_rel_label {
     my ($self, $obs_runs, $p, $is_done) = @_;
     my $Lobs = scalar(@$obs_runs);
     my $Lpat = $p->{runs_count} // scalar(@{$p->{runs}});
-    
+
     # Check if this is the special case: dot-ended pattern with release after
     my $pattern_ends_with_press = ($p->{runs}[-1]{sym} eq $self->{sym_press});
-    my $obs_is_just_release_after = ($Lobs == $Lpat + 1 && 
+    my $obs_is_just_release_after = ($Lobs == $Lpat + 1 &&
                                       $obs_runs->[-1]{sym} eq $self->{sym_release});
-    
+
     # INVALIDATED by run count exceeding pattern (except for dot+release case)
     if ($Lobs > $Lpat && !($pattern_ends_with_press && $obs_is_just_release_after)) {
         return 'REL:INVALID';
     }
-    
+
     # If this pattern was ever done earlier, reflect that stably in the facet.
     if ($p->{_ever_done}) {
         return 'REL:DONE';
@@ -911,103 +999,35 @@ sub _facet_rel_label {
     return sprintf('REL:PART %d/%d', $Lobs, $Lpat);
 }
 
-
-# abbreviated pattern for pat="...": prefix colored by per-run penalty; remainder dim
-sub _viz_pattern_abbrev_perrun {
-    my ($self, $perrun, $p_runs, $k) = @_;
-    my $scale   = $self->{viz_scale};
-    my $symbols = $self->{viz_symbols};
-    my $maxc    = $self->{viz_abbrev_max};
-    my $out     = $self->{_viz_pat_bg};
-    my $count   = 0;
-
-    # Defensive: synthesize empty per-run info if missing
-    my @fallback;
-    if (ref($perrun) ne 'ARRAY' || !@$perrun) {
-        @fallback = map { +{ sym => $_->{sym}, pen => 0 } } @$p_runs;
-        $perrun = \@fallback;
-    }
-
-    # prefix
-    for my $i (0..($k-1)) {
-        my $sym  = (defined $perrun->[$i] && exists $perrun->[$i]{sym})
-                   ? $perrun->[$i]{sym} : ($p_runs->[$i]{sym} // '.');
-        my $pen  = (defined $perrun->[$i] && exists $perrun->[$i]{pen})
-                   ? $perrun->[$i]{pen} : 0;
-        my $n    = max(1, int(($p_runs->[$i]{len}//1) * $scale + 0.5));
-        my $ch   = $symbols->{$sym} // $sym;
-        my $fg   = $self->{viz_show_colors} ? _fg_for_pen($sym, $pen) : '';
-        for (my $j=0; $j<$n && $count<$maxc; $j++) { $out .= $fg . $ch; $count++; }
-        last if $count >= $maxc;
-    }
-
-    # remainder (dim)
-    for my $i ($k..$#$p_runs) {
-        my $sym = $p_runs->[$i]{sym};
-        my $n   = max(1, int(($p_runs->[$i]{len}//1) * $scale + 0.5));
-        my $ch  = $symbols->{$sym} // $sym;
-        my $fg  = $self->{viz_show_colors} ? _fg_for_pen($sym, 999) : '';
-        for (my $j=0; $j<$n && $count<$maxc; $j++) { $out .= $fg . $ch; $count++; }
-        last if $count >= $maxc;
-    }
-
-    $out .= "…" if $count >= $maxc;
-    return $out . _ansi_reset();
-}
-
 sub _debug_dump_observation {
     my ($self, $obs_runs, $dt) = @_;
     my $q = $self->{quantum_ms};
-    printf("[t=+%.03fs] OBS q=%dms len=%dq (~%dms)\n",
+    my $usr_label = $self->_facet_usr_label();
+
+    printf("[t=+%.03fs] OBS q=%dms len=%dq (~%dms) %s\n",
            $dt, $q, scalar(@$obs_runs),
-           int(sum(map { $_->{len} } @$obs_runs) * $self->{quantum_ms}));
+           int(sum(map { $_->{len} } @$obs_runs) * $self->{quantum_ms}),
+           $usr_label);
 }
-
-
-# sub _debug_dump_observation {
-#     my ($self, $obs_runs, $dt) = @_;
-#     my $q = $self->{quantum_ms};
-#     my $symmap = $self->{viz_symbols} || {};
-#     my $s = '';
-#     for my $r (@$obs_runs) {
-#         my $glyph = $symmap->{$r->{sym}} // $r->{sym};
-#         $s .= ($glyph x max(1, int($r->{len} + 0.5)));
-#     }
-#     printf("[t=+%.03fs] OBS q=%dms len=%dq (~%dms)  \"%s\"\n",
-#            $dt, $q, scalar(@$obs_runs),
-#            int(sum(map { $_->{len} } @$obs_runs) * $self->{quantum_ms}), $s);
-# }
 
 sub _debug_dump_candidates {
     my ($self, $obs_runs, $full_ref, $best_ub_w, $dt) = @_;
-    my $usr = $self->_viz_pattern_str($obs_runs, 1);
-    printf("%63s usr=\"%s\"\n", '', $usr);
 
-    my $usr_label = $self->_facet_usr_label();
+    # Build user observation viz
+    my $usr = $self->_viz_pattern_str($obs_runs, 1);
+
+    # Pre-generate all pattern lines and track max prefix width
+    my @rendered;
+    my $max_prefix_width = 0;
 
     my %seen_full = map { $self->{patterns}[ $_->{idx} ]{name} // $_->{idx} => 1 } @$full_ref;
 
     # FULL-ish rows (prefix-covered or invalidated)
     for my $c (@$full_ref) {
         my $p = $self->{patterns}[$c->{idx}];
-        my $rel = $self->_facet_rel_label($obs_runs, $p, $c->{is_done});
-        my $k = $p->{runs_count};
-        my $per = $c->{perrun_info} // $c->{perrun};
-        my $pat = $self->_viz_pattern_abbrev_perrun($per, $p->{runs}, $k);
-        
-        # Compute UB for this pattern (if not invalidated and still has potential)
-        my $ub_str = '';
-        if (!$c->{invalidated} && @$obs_runs < @{$p->{runs}}) {
-            my ($ub_raw, undef) = _prefix_ub_with_perrun($obs_runs, $p);
-            my $ub_w = $ub_raw * ($p->{weight} // 1.0);
-            $ub_str = sprintf(" UB=%.3f", $ub_w);
-        }
-        
-        # Add invalidation marker
-        my $inv_marker = $c->{invalidated} ? ' INV' : '';
-        
-        printf("  %-14s %-12s %s  score=%.3f  w=%.2f%s%s  pat=\"%s\"\n",
-               $c->{name}, $rel, $usr_label, $c->{score}, ($p->{weight}//1.0), $ub_str, $inv_marker, $pat);
+        my ($prefix, $viz, $width) = $self->_build_pattern_line($c, $p, $obs_runs, 'FULL');
+        $max_prefix_width = $width if $width > $max_prefix_width;
+        push @rendered, { prefix => $prefix, viz => $viz, bg => $p->{_viz_bg_ansi}, type => 'pat' };
     }
 
     # UB rows: strict supersequences of observation prefix
@@ -1017,27 +1037,220 @@ sub _debug_dump_candidates {
         next if $seen_full{$name};
         next unless @$obs_runs < @{$p->{runs}};
         next unless _runs_prefix($obs_runs, $p->{runs});
+
         my ($ub_raw, $sim_prefix) = _prefix_ub_with_perrun($obs_runs, $p);
         my $ub_w = $ub_raw * ($p->{weight} // 1.0);
-        my $k    = scalar(@$obs_runs);
-        my $per  = _sim_prefix_to_perrun($p, $sim_prefix);
-        my $pat  = $self->_viz_pattern_abbrev_perrun($per, $p->{runs}, $k);
-        my $rel  = sprintf('REL:PART %d/%d', $k, scalar(@{$p->{runs}}));
-        printf("  %-14s %-12s %s  PAT:OPEN UB=%.3f  w=%.2f  pat=\"%s\"\n",
-               $name, $rel, $usr_label, $ub_w, ($p->{weight}//1.0), $pat);
+
+        # Build candidate structure for UB
+        my $k = scalar(@$obs_runs);
+        my $per = _sim_prefix_to_perrun($p, $sim_prefix);
+        my $rel = sprintf('REL:PART %d/%d', $k, scalar(@{$p->{runs}}));
+
+        my $c_ub = {
+            name => $name,
+            score => $ub_w,
+            raw => $ub_raw,
+            idx => $j,
+            perrun_info => $per,
+            runs_count => scalar(@{$p->{runs}}),
+            len_total => $p->{len_total},
+            is_done => 0,
+            peak_done => 0,
+            invalidated => 0,
+            is_ub => 1,
+            ub_prefix_len => $k,
+        };
+
+        my ($prefix, $viz, $width) = $self->_build_pattern_line($c_ub, $p, $obs_runs, 'UB');
+        $max_prefix_width = $width if $width > $max_prefix_width;
+        push @rendered, { prefix => $prefix, viz => $viz, bg => $p->{_viz_bg_ansi}, type => 'pat' };
+    }
+
+    # Print usr line with proper alignment
+    my $usr_type = $self->{viz_display}{type} ? 'usr=' : '';
+    my $q_open = $self->{viz_display}{quotes} ? '"' : '';
+    my $q_close = $self->{viz_display}{quotes} ? '"' : '';
+
+    printf("%*s%s%s%s%s\n", $max_prefix_width, '', $usr_type, $q_open, $usr, $q_close);
+
+    # Print all pattern lines
+    for my $line (@rendered) {
+        print $line->{bg} . $line->{prefix};
+        my $pat_type = $self->{viz_display}{type} ? ' pat=' : ' ';
+        print $pat_type . $q_open . $line->{viz} . $q_close;
+        print $self->{_viz_reset} . "\n";
     }
 }
 
-# --- similarity color ramp (per run) -----------------------------------------
-sub _ansi_for_sim {
-    my ($s) = @_;  # s in [0,1]
-    return '' unless defined $s;
-    # Bright green → green → yellow → orange → red
-    return "\e[38;5;46m"  if $s >= 0.97;   # bright green
-    return "\e[32m"       if $s >= 0.90;   # green
-    return "\e[33m"       if $s >= 0.80;   # yellow
-    return "\e[38;5;208m" if $s >= 0.65;   # orange
-    return "\e[31m";                          # red
+# Build a single pattern line with prefix and viz
+sub _build_pattern_line {
+    my ($self, $c, $p, $obs_runs, $kind) = @_;  # kind = 'FULL' or 'UB'
+
+    my @parts;
+    my $prefix_width = 2;  # Leading "  "
+
+    # Name field
+    if ($self->{viz_display}{name}) {
+        my $name_str = sprintf("%-14s", $c->{name});
+        push @parts, $name_str;
+        $prefix_width += length($name_str) + 1;
+    }
+
+    # REL label field
+    if ($self->{viz_display}{rel_label}) {
+        my $rel = $self->_facet_rel_label($obs_runs, $p, $c->{is_done});
+        my $rel_str = sprintf("%-14s", $rel);
+        push @parts, $rel_str;
+        $prefix_width += length($rel_str) + 1;
+    }
+
+    # Score field
+    if ($self->{viz_display}{score}) {
+        my $score_str;
+        if ($kind eq 'UB') {
+            $score_str = sprintf("UB=%.3f", $c->{score});
+        } elsif ($c->{invalidated}) {
+            $score_str = "score=0.000 INV";
+        } else {
+            $score_str = sprintf("score=%.3f", $c->{score});
+        }
+        push @parts, $score_str;
+        $prefix_width += length($score_str) + 1;
+    }
+
+    # Weight field
+    if ($self->{viz_display}{weight}) {
+        my $w_str = sprintf("w=%.2f", $p->{weight} // 1.0);
+        push @parts, $w_str;
+        $prefix_width += length($w_str) + 1;
+    }
+
+    my $prefix = "  " . join(' ', @parts);
+
+    # Build visualization
+    my $viz;
+    if ($kind eq 'UB') {
+        # UB: prefix colored, suffix dimmed
+        $viz = $self->_viz_pattern_abbrev_perrun($c->{perrun_info}, $p->{runs}, $c->{ub_prefix_len} // 0);
+    } else {
+        # FULL: all runs colored by per-run info
+        my $k = $p->{runs_count};
+        $viz = $self->_viz_pattern_abbrev_perrun($c->{perrun_info}, $p->{runs}, $k);
+    }
+
+    return ($prefix, $viz, $prefix_width);
+}
+
+# Full pattern with bg; colored by per-run similarity (user observation)
+sub _viz_pattern_str {
+    my ($self, $runs, $is_user) = @_;
+    my $scale   = $self->{viz_scale};
+    my $symbols = $self->{viz_symbols};
+    my $bg      = $is_user ? $self->{_viz_user_bg} : $self->{_viz_default_bg_ansi};
+    my $s = $bg;
+
+    for my $r (@$runs) {
+        my $n  = max(1, int(($r->{len}//1) * $scale + 0.5));
+        my $ch = $symbols->{$r->{sym}} // $r->{sym};
+
+        # User observation gets perfect similarity (pen=0, sim=1.0)
+        my $fg = $self->_fg_for_pen($r->{sym}, 0, 1.0);
+
+        if ($is_user) {
+			if ($r->{sym} eq $self->{sym_release}) {
+				$s .= $fg . ($ch x $n);
+			} else {
+				$s .= $fg . ($ch x ($n-1));
+				$ch = $self->{viz_symbol_release}{$r->{sym}} // $ch;
+				$s .= $self->{_viz_release_edge_bg_ansi} . $fg . $ch . $bg;
+			}
+		} else { # Pattern just gets the similarity color on each run
+            $s .= $fg . ($ch x $n);
+        }
+    }
+    return $s . $self->{_viz_reset};
+}
+
+# Enhanced gradient for run accuracy visualization
+# pen==0 → near-white; higher pen → darker base color per symbol family
+# At very high similarity (>90%), transition to yellow
+sub _fg_for_pen {
+    my ($self, $sym, $pen, $sim) = @_;
+    return '' unless $self->{viz_show_colors};
+
+    # If similarity provided and very high (>0.90), transition to yellow
+    # Standard gradient based on penalty (0-0.90 similarity range)
+    my $alpha = 1.0 / (1.0 + ($pen // 0));  # (0,1], 0-pen ~ near-white
+    my ($r1, $g1, $b1, $r2, $g2, $b2);
+    if ($sym eq '~') {
+        ($r1, $g1, $b1) = (120, 120, 205);  # near-white blue
+        ($r2, $g2, $b2) = (0, 0, 120);      # dark blue
+    } else {
+        ($r1, $g1, $b1) = (120, 255, 120);  # near-white green
+        ($r2, $g2, $b2) = (0, 80, 0);       # dark green
+    }
+    my $r = int($r2 + ($r1 - $r2) * $alpha + 0.0);
+    my $g = int($g2 + ($g1 - $g2) * $alpha + 0.0);
+    my $b = int($b2 + ($b1 - $b2) * $alpha + 0.0);
+    return _ansi_rgb($r, $g, $b);
+}
+
+
+# Abbreviated pattern for pat="...": prefix colored by per-run penalty; remainder dim
+sub _viz_pattern_abbrev_perrun {
+    my ($self, $perrun, $p_runs, $k) = @_;
+    my $scale   = $self->{viz_scale};
+    my $symbols = $self->{viz_symbols};
+    my $maxc    = $self->{viz_abbrev_max};
+    my $out     = '';
+    my $count   = 0;
+
+    # Defensive: synthesize empty per-run info if missing
+    my @fallback;
+    if (ref($perrun) ne 'ARRAY' || !@$perrun) {
+        @fallback = map { +{ sym => $_->{sym}, pen => 999, sim => 0.1 } } @$p_runs;
+        $perrun = \@fallback;
+    }
+
+    # prefix (colored by per-run similarity/penalty)
+    for my $i (0..($k-1)) {
+        my $sym  = (defined $perrun->[$i] && exists $perrun->[$i]{sym})
+                   ? $perrun->[$i]{sym} : ($p_runs->[$i]{sym} // '.');
+        my $pen  = (defined $perrun->[$i] && exists $perrun->[$i]{pen})
+                   ? $perrun->[$i]{pen} : 0;
+        my $sim  = (defined $perrun->[$i] && exists $perrun->[$i]{sim})
+                   ? $perrun->[$i]{sim} : 1.0;
+        my $n    = max(1, int(($p_runs->[$i]{len}//1) * $scale + 0.5));
+        my $ch   = $symbols->{$sym} // $sym;
+
+        my $fg = $self->_fg_for_pen($sym, $pen, $sim);
+
+		my $chars_to_output = min($n, $maxc - $count);
+		if ($chars_to_output > 0) {
+			$out .= $fg . ($ch x $chars_to_output);
+			$count += $chars_to_output;
+		}
+
+		last if $count >= $maxc;
+    }
+
+    # remainder (dimmed)
+    my $dim_fg = _ansi_rgb(80, 80, 80);
+    for my $i ($k..$#$p_runs) {
+        my $sym = $p_runs->[$i]{sym};
+        my $n   = max(1, int(($p_runs->[$i]{len}//1) * $scale + 0.5));
+        my $ch  = $symbols->{$sym} // $sym;
+
+		my $chars_to_output = min($n, $maxc);
+		if ($chars_to_output > 0) {
+			$out .= $dim_fg . ($ch x $chars_to_output);
+			$count += $chars_to_output;
+		}
+        last if $count >= $maxc;
+    }
+
+    $out .= "…" if $count >= $maxc;
+    return $out;
 }
 
 # Render full pattern with per-run colorization; for UB, prefix colored, suffix dimmed
@@ -1065,28 +1278,6 @@ sub _render_pattern_colored {
     }
     return $s;
 }
-
-# Convert similarity s∈[0,1] to a penalty 'pen' compatible with _fg_for_pen (NEW)
-sub _sim_to_pen {
-    my ($s) = @_;
-    return 999 if !defined $s || $s <= 0;
-    return 0   if $s >= 0.999999;
-    # s = exp(-0.5*z^2)  ⇒  z^2 = -2 ln s
-    my $z2 = -2.0 * log($s);
-    return $z2;
-}
-
-# Build per-run info array (sym, pen) for UB prefix (NEW)
-sub _sim_prefix_to_perrun {
-    my ($p, $sim_prefix) = @_;
-    my @out;
-    for my $i (0..$#$sim_prefix) {
-        my $sym = $p->{runs}[$i]{sym};
-        push @out, { sym => $sym, pen => _sim_to_pen($sim_prefix->[$i]) };
-    }
-    return \@out;
-}
-
 
 
 1;

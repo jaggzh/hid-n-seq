@@ -10,8 +10,10 @@ use Getopt::Long::Descriptive;
 use YAML::XS qw(LoadFile);
 use IO::Socket::INET;
 use IO::Select;
+use Term::ReadKey;
 
 my $def_file = "wifi-gestures.yaml";
+$def_file = "my-gestures.yaml";
 my $def_quantum_s = 0.02;
 my $def_port = 10102;
 my $verbose = 3;
@@ -32,7 +34,6 @@ sub main {
             { 'default' => $def_file, } ],
         [ 'net|N'           => "Use network mode instead of mouse" ],
         [ 'port|p=i'        => "Listen port ($def_port) (implies -N)", {
-            default => $def_port,
             implies => 'net'
         }],
         [ 'quantum-s|q=f'    => "Smallest resolution of sensing durations (seconds, float ($def_quantum_s)",
@@ -45,8 +46,9 @@ sub main {
     print($usage->text), exit if $opt->help;
     
     $verbose = $opt->verbose;
-    my $use_net = $opt->net;
-    my $port = $opt->port;
+    my $use_net = 0;
+	$use_net = 1 if $opt->net;
+    my $port = $opt->port // $def_port;
     
     if ($opt->gesture_file) {
         die "No such YAML: " . $opt->gesture_file . "\n"
@@ -88,6 +90,7 @@ sub main {
     
     # Mode-specific setup
     my ($sel_net, $client);
+	ReadMode('cbreak');
     
     if ($use_net) {
         # Network mode
@@ -104,9 +107,7 @@ sub main {
         print "=" x 60 . "\n";
         print "Listening on port: $port\n";
     } else {
-        # Mouse mode
-        require Term::ReadKey;
-        Term::ReadKey::ReadMode('cbreak');
+        # Mouse mode (default)
         print "\e[?1000;1003;1006h";  # enable full mouse tracking
         $mouse_enabled = 1;
         
@@ -124,9 +125,9 @@ sub main {
     print "\n";
     
     if ($use_net) {
-        print "Waiting for network connection. Press Ctrl-C to quit.\n";
+        print "Waiting for network connection. Press 'q' or Ctrl-C to quit.\n";
     } else {
-        print "Left-click anywhere to test gestures. Press Ctrl-C or 'q' to quit.\n";
+        print "Left-click anywhere to test gestures. Press 'q' or Ctrl-C to quit.\n";
     }
     print "-" x 60 . "\n\n";
     
@@ -135,8 +136,39 @@ sub main {
     
     my $last_update = time();
     while (1) {
+        # Always check for keyboard input (works in both modes)
+        my $c = ReadKey(-1);
+        
+        if (defined $c) {
+            if ($c eq "q") {
+                say "QUIT";
+                last;
+            } elsif ($c eq "\n") {
+                print "\n" x 50;
+            } elsif (!$use_net && $c eq "\e") {
+                # Mouse mode: handle mouse sequences
+                my $seq = $c;
+                my $next;
+                while (defined($next = Term::ReadKey::ReadKey(-1))) {
+                    $seq .= $next;
+                    last if $next =~ /[A-Za-z~]$/;
+                }
+                if ($seq =~ /\e\[<(\d+);(\d+);(\d+)([Mm])/) {
+                    my ($btn, $x, $y, $state) = ($1, $2, $3, $4);
+                    if ($btn == 0) {
+                        if ($state eq 'M') {
+                            $recognizer->press(time());
+                        } else {
+                            $recognizer->release(time());
+                        }
+                        $last_feed = time();
+                    }
+                }
+            }
+        }
+        
         if ($use_net) {
-            # Network mode
+            # Network mode: handle connections
             my @ready = $sel_net->can_read(0.001);
             
             foreach my $fh (@ready) {
@@ -213,6 +245,18 @@ sub main {
     }
 }
 
+# Non-blocking stdin check for network mode
+sub _check_stdin {
+    use IO::Select;
+    state $sel = IO::Select->new(\*STDIN);
+    my @ready = $sel->can_read(0);
+    return undef unless @ready;
+    
+    my $c;
+    sysread(STDIN, $c, 1);
+    return $c;
+}
+
 sub handle_gesture {
     my ($gesture_name, $score, $meta) = @_;
     my $when = ($meta && exists $meta->{t_end}) ? $meta->{t_end} : time();
@@ -230,9 +274,9 @@ sub handle_gesture {
 sub cleanup {
     if ($mouse_enabled) {
         print "\e[?1000;1003;1006l";  # disable mouse tracking
-        Term::ReadKey::ReadMode('restore');
         print "\nMouse tracking disabled. Exiting.\n";
     }
+    ReadMode('restore');
     if ($server) {
         $server->close();
         print "\nServer closed. Exiting.\n";

@@ -157,6 +157,12 @@ sub viz_set_display {
     }
 }
 
+sub _ansi_rgb   { return sprintf("\e[38;2;%d;%d;%dm", $_[0], $_[1], $_[2]); }
+sub _ansi_bg    { return sprintf("\e[48;2;%d;%d;%dm", $_[0], $_[1], $_[2]); }
+sub _ansi_dim   { "\e[2m" }
+sub _ansi_boit  { "\e[1m\e[3m" }
+sub _ansi_boit_end { "\e[22m\e[23m" }
+
 # -----------------------------------------------------------------------------
 # External interface: feed edges and ticks
 # -----------------------------------------------------------------------------
@@ -881,10 +887,6 @@ sub _no_match {
 # -----------------------------------------------------------------------------
 # Visualization helpers (colors, backgrounds, abbreviated renderings)
 # -----------------------------------------------------------------------------
-sub _ansi_rgb   { return sprintf("\e[38;2;%d;%d;%dm", $_[0], $_[1], $_[2]); }
-sub _ansi_bg    { return sprintf("\e[48;2;%d;%d;%dm", $_[0], $_[1], $_[2]); }
-sub _ansi_dim   { "\e[2m" }
-
 # Generate pattern background color from name hash
 sub _pattern_bg_color {
     my ($self, $name) = @_;
@@ -1092,8 +1094,8 @@ sub _build_pattern_line {
     # Name field
     if ($self->{viz_display}{name}) {
         my $name_str = sprintf("%-14s", $c->{name});
-        push @parts, $name_str;
         $prefix_width += length($name_str) + 1;
+        push @parts, _ansi_boit . $name_str . _ansi_boit_end;
     }
 
     # REL label field

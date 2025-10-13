@@ -17,9 +17,14 @@ $def_file = "my-gestures.yaml";
 my $def_quantum_s = 0.02;
 my $def_port = 10102;
 my $verbose = 2;
-my $_ansi_matched = "\033[32;1m";
-my $_ansi_score = "\033[33;1m";
-my $_ansi_reset = "\033[0m";
+sub _ansi_rgb   { return sprintf("\e[38;2;%d;%d;%dm", $_[0], $_[1], $_[2]); }
+sub _ansi_bg    { return sprintf("\e[48;2;%d;%d;%dm", $_[0], $_[1], $_[2]); }
+sub _ansi_boit  { "\e[1m\e[3m" }
+sub _ansi_boit_end { "\e[22m\e[23m" }
+sub _ansi_bo  { "\e[1m" }
+my $_ansi_matched = _ansi_bg(40,155,40) . _ansi_rgb(255,255,255) . _ansi_boit;
+my $_ansi_score = "\e[33;1m";
+my $_ansi_reset = "\e[0m";
 
 # Global state for cleanup
 my ($mouse_enabled, $server, $recognizer);
@@ -265,7 +270,7 @@ sub handle_gesture {
         print "at: $when  ---  ";
     } else {
         my $score_s = defined($score) ? sprintf('%.3f',$score) : '—';
-        print "\nMatched: $_ansi_matched$gesture_name$_ansi_reset  score=$_ansi_score$score_s$_ansi_reset\n";
+        print "\nMatched: $_ansi_matched $gesture_name $_ansi_reset  score=$_ansi_score$score_s$_ansi_reset\n";
         print "at: $when  ---  ";
     }
     print "(q) or Ctrl-C to quit\n";

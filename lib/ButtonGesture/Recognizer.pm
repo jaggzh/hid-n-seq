@@ -60,8 +60,8 @@ sub new {
         viz_show_colors     => exists $a{viz_show_colors} ? !!$a{viz_show_colors} : 1,
         viz_scale           => defined $a{viz_scale} ? 0.0 + $a{viz_scale} : 1.0,
         viz_abbrev_max      => defined $a{viz_abbrev_max} ? 0 + $a{viz_abbrev_max} : 120,
-        viz_user_bg_rgb     => $a{viz_user_bg_rgb} // [ 18, 18, 18 ],
-        viz_pat_bg_rgb      => $a{viz_pat_bg_rgb}  // [ 10, 10, 10 ],
+        viz_user_bg_rgb     => $a{viz_user_bg_rgb} // [ 38, 38, 38 ],
+        viz_pat_bg_rgb      => $a{viz_pat_bg_rgb}  // [ 25, 25, 25 ],
         # defaults if pattern-run variance/weight missing
         default_var_press   => defined $a{default_var_press}   ? 0.0 + $a{default_var_press}   : 1.0,
         default_var_release => defined $a{default_var_release} ? 0.0 + $a{default_var_release} : 2.0,

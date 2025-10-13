@@ -410,7 +410,7 @@ sub _evaluate_if_ready {
         # RELAXED: allow equal-length (LAST) patterns too; skip only if that pattern is already DONE
         next unless _runs_prefix_relaxed($obs_runs, $q->{runs});    # symbol-prefix (<= length) match
         next if (@$obs_runs == @{$q->{runs}} && $self->_pattern_is_done($obs_runs, $q, $last_kind));
-        my ($ub_raw, undef) = _prefix_ub_with_perrun($obs_runs, $q); # optimistic suffix gated by current run
+        my ($ub_raw, undef) = $self->_prefix_ub_with_perrun($obs_runs, $q); # optimistic suffix gated by current run
         my $ub_w = $ub_raw * ($q->{weight} // 1.0);
         if ($ub_w > $best_ub_w)    { $best_ub_w   = $ub_w;  }
         if ($ub_raw > $best_ub_raw){ $best_ub_raw = $ub_raw; $best_ub_idx = $j; }
@@ -488,7 +488,7 @@ sub _evaluate_if_ready {
 
             next unless _runs_prefix($obs_runs, $q->{runs});
             next if @$obs_runs >= @{$q->{runs}} && $self->_pattern_is_done($obs_runs, $q, $last_kind);
-            my ($ub_raw_j, undef) = _prefix_ub_with_perrun($obs_runs, $q);
+            my ($ub_raw_j, undef) = $self->_prefix_ub_with_perrun($obs_runs, $q);
 
             # INVALIDATION by UB: If UB is below threshold, pattern has failed
             next if $ub_raw_j < $threshold;
@@ -519,7 +519,12 @@ sub _evaluate_if_ready {
 
                 my $val = 0.0;
                 if (@$obs_runs < @{$q->{runs}}) {
-                    my ($ub_raw_j, undef) = _prefix_ub_with_perrun($obs_runs, $q);
+                    my ($ub_raw_j, undef) = $self->_prefix_ub_with_perrun($obs_runs, $q);
+
+                    if ($self->{verbose} >= 3) {
+                        printf("  [HOLD UB] Pattern=%s ub_raw=%.4f threshold=%.4f weight=%.2f\n",
+                               $q->{name}, $ub_raw_j, $threshold, $q->{weight}//1.0);
+                    }
 
                     # INVALIDATION by UB: If UB below threshold, pattern has failed
                     next if $ub_raw_j < $threshold;
@@ -610,9 +615,8 @@ sub _evaluate_if_ready {
 # _full_score_variance: raw in [0,1]; runs beyond pattern length ignored.
 # raw = (sum_j w_j * per_run_score_j) / (sum_j w_j), where per_run_score_j = exp(-0.5 * z^2)
 #   and z = (obs_len_dots - mean_len_dots) / max(variance_dots, eps)
-# ----------------------------------------------------------------------------
-
 # _full_score_variance: return (raw, perrun_info)
+# ----------------------------------------------------------------------------
 sub _full_score_variance {
     my ($obs_runs, $p) = @_;
     my $pruns = $p->{runs};
@@ -643,7 +647,6 @@ sub _full_score_variance {
     # my $edges_total = ($L > 1) ? ($L - 1) : 1;
     # say "DEBUG: Pattern=$p->{name} raw_before_edge=$raw edges_total=$edges_total" if $p->{name} eq 'click';
 
-
     # transition (edge) bonus — more observed edges ⇒ slightly higher raw
     my $ew = $p->{_edge_bonus_weight} // 0.0;
     if ($ew > 0) {
@@ -652,6 +655,19 @@ sub _full_score_variance {
         my $edge_frac   = ($edges_total > 0) ? ($edges_have / $edges_total) : 1.0;
         $raw *= (1.0 + $ew * $edge_frac);
         $raw  = 1.0 if $raw > 1.0;  # keep raw ≤ 1 before pattern weight
+    }
+
+    my $last_run_idx = $L - 1;
+    my $r_last = $pruns->[$last_run_idx];
+    if ($r_last->{sym} eq '.' && @$obs_runs > $last_run_idx) {  # dot-ended pattern
+        my $mu_last = 0.0 + ($r_last->{len} // 1);
+        my $sd_last = 0.0 + ($r_last->{variance} // 1.0);
+        my $x_last  = 0.0 + ($obs_runs->[$last_run_idx]{len} // 0);
+        
+        # If way beyond salvageable (more than μ + 3σ), invalidate
+        if ($x_last > $mu_last + 2 * $sd_last) {
+            return (0.0, []);  # Invalidate - holding way too long
+        }
     }
 
     return ($raw, \@per_info);
@@ -689,7 +705,7 @@ sub _prefix_upperbound_variance {
 
 # UB with per-run similarities (for colored viz prefix)
 sub _prefix_ub_with_perrun {
-    my ($obs_runs, $q) = @_;
+    my ($self, $obs_runs, $q) = @_;
     my $qruns = $q->{runs};
     my $K = scalar(@$obs_runs);
 
@@ -725,12 +741,24 @@ sub _prefix_ub_with_perrun {
             my $s_now = exp(-0.5 * $z_now * $z_now);
             # salvage: if we can still reach μ by ending soon, UB=1 for this run; otherwise best is current
             my $s_feasible = ($x <= $mu) ? 1.0 : $s_now;
+            # Current run gates the suffix - if this run is badly wrong, suffix can't save it
+            # my $s_feasible = $s_now; 
+            if ($s_feasible < 0.1) {
+                return (0.0, \@sim_prefix);  # Kill the UB entirely
+            }
+
+
             $acc  += $w * $s_feasible;
             $w_sum+= $w;
             $sim_prefix[$i] = $s_feasible;
 
             # Gate suffix by current run's salvageability
             $g = $s_feasible;
+			if ($self->{verbose} >= 3) {
+				printf("  [UB DEBUG] Pattern=%s K=%d run=%d x=%.1f μ=%.1f s_now=%.4f s_feasible=%.4f g=%.4f\n",
+					   $q->{name}, $K, $K-1, $x, $mu, $s_now, $s_feasible, $g);
+			}
+
         }
     }
 
@@ -1040,7 +1068,7 @@ sub _debug_dump_candidates {
         next unless @$obs_runs < @{$p->{runs}};
         next unless _runs_prefix($obs_runs, $p->{runs});
 
-        my ($ub_raw, $sim_prefix) = _prefix_ub_with_perrun($obs_runs, $p);
+        my ($ub_raw, $sim_prefix) = $self->_prefix_ub_with_perrun($obs_runs, $p);
         my $ub_w = $ub_raw * ($p->{weight} // 1.0);
 
         # Build candidate structure for UB
@@ -1110,11 +1138,11 @@ sub _build_pattern_line {
     if ($self->{viz_display}{score}) {
         my $score_str;
         if ($kind eq 'UB') {
-            $score_str = sprintf("   UB=%.3f   ", $c->{score});
+            $score_str = sprintf("   UB=%.3f      ", $c->{score});
         } elsif ($c->{invalidated}) {
-            $score_str = "score=0.000 INV    ";
+            $score_str = "score=0.000 INV  ";
         } else {
-            $score_str = sprintf("score=%.3f   ", $c->{score});
+            $score_str = sprintf("score=%.3f      ", $c->{score});
         }
         push @parts, $score_str;
         $prefix_width += length($score_str) + 1;
@@ -1243,11 +1271,11 @@ sub _viz_pattern_abbrev_perrun {
         my $n   = max(1, int(($p_runs->[$i]{len}//1) * $scale + 0.5));
         my $ch  = $symbols->{$sym} // $sym;
 
-		my $chars_to_output = min($n, $maxc);
-		if ($chars_to_output > 0) {
-			$out .= $dim_fg . ($ch x $chars_to_output);
-			$count += $chars_to_output;
-		}
+        my $chars_to_output = min($n, $maxc);
+        if ($chars_to_output > 0) {
+            $out .= $dim_fg . ($ch x $chars_to_output);
+            $count += $chars_to_output;
+        }
         last if $count >= $maxc;
     }
 
@@ -1283,3 +1311,5 @@ sub _render_pattern_colored {
 
 
 1;
+
+# vim: et ts=4 sw=4 sts=4

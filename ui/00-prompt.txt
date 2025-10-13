@@ -1,0 +1,61 @@
+Otay! i have a perl module which takes remote wifi single button press patterns ("gestures", I guess) and returns a string that's the label of the pattern. eg. click, double click, triple click, mediumpress, longpress, verylongpress, whatever. THey can label them anything they like. We'll call them "events", and what they do, "actions".
+
+Now, I need a perl gui module that'll let those events be assigned to function calls to perform actions.
+
+. the first example would be a single click being a mouse button click.
+. double click induce rmb.
+. longpress might be the thing to pop up a UI that probably swaps the events to its own calls, so single click moves through the ui elements, so the user can pick them.
+
+(I'm in Linux, X11, KDE)
+
+Probably the ui itself will be divided into sections.
+The order of these should be changable without too much trouble, and possibly through user config (yaml?)
+For the user might find some sections more conveniently-located ...
+
+If it's not clear, this is an accessibility HID interface module, and its gui tools,
+which aren't necessarily just one window..
+
+So, let's say, for now, the first section is a Presets section, where the user can doubleclick to activate, and click to move to the next section.
+
+Once activated, single click would move from one preset to the next.
+
+The assignments of events to the ui functions should also be configurable.
+We should have a system defaults, and then the user overrides.
+
+I think a section might be more-conveniently broken up into rows, itself, so the initial click wouldn't necessarily move to the next full section, but let the user move to the next row of presets. In this manner, sections with many options don't demand the user click through dozens of options.
+
+## UI draft layout ##
+[Premade Activity Buttons] [Row 1]
+[Super duper Single Button Pattern Keyboard!! Future project. :( ]
+
+[Presets] [Row 1] {Preset 1} ... {Preset N}
+[Presets] [Row 2] {Preset N+1} ... {Preset N+1+M}
+
+[Premade Activity Buttons] [Row 2] (These do functions when chosen)
+
+[Currently Highlighted Preset Assignments] (Info area showing the HIGHLIGHTED preset, if they're on one, and its event->action mappings (but not chosen as active))
+[Active Preset Assignments] (Info area showing the actual currently Active Preset, and its mappings)
+[UI Key] (Help on events->actions accepted in the UI)
+## END layout ##
+
+
+The Quick Event Selector:
+I also think, in the main UI, the user might want the ability to rapidly reassign events to anything in the available list of functions. This would allow them to make quick changes to their assignments without going through full preset configuration.
+
+I think what pops up is also a function. Thus, they may assign longpress to the main UI, or they may assign it directly to the Preset Configurator.
+We should allow it to be configured which of the sections/rows is active when the main UI pops up.
+
+So perhaps our sections OR our sections' rows are each called "widgets".
+And the main UI is a widget made of widgets?
+
+I don't want to get TOO crazy with how dynamic everything is. It's quite likely we can just have them in code and with ids assigned so we can go through the configured order adding them sequentially by name.
+Or perhaps the config is not yaml, for the UI, but text, like:
+preset1
+activities1 activities2 (This allows 'cell | cell' in one row. Thus, if the user has a left and right action assigned, they might more-quickly navigate down rows and across cells)
+
+
+activities1 might contain an action to go to "The Preset Config Window"
+now, as liberated as we want the user to be, for now assistance is fine to handle much of the config. But we do want to expose many abilities, conveniently and accessible, to the user.
+
+
+

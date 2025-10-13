@@ -1151,21 +1151,21 @@ sub _viz_pattern_str {
     my $bg      = $is_user ? $self->{_viz_user_bg} : $self->{_viz_default_bg_ansi};
     my $s = $bg;
 
-    for my $r (@$runs) {
+    for my $idx (0..$#$runs) {
+    	my $r = $runs->[$idx];
         my $n  = max(1, int(($r->{len}//1) * $scale + 0.5));
         my $ch = $symbols->{$r->{sym}} // $r->{sym};
-
         # User observation gets perfect similarity (pen=0, sim=1.0)
         my $fg = $self->_fg_for_pen($r->{sym}, 0, 1.0);
 
-        if ($is_user) {
-			if ($r->{sym} eq $self->{sym_release}) {
-				$s .= $fg . ($ch x $n);
-			} else {
-				$s .= $fg . ($ch x ($n-1));
-				$ch = $self->{viz_symbol_release}{$r->{sym}} // $ch;
-				$s .= $self->{_viz_release_edge_bg_ansi} . $fg . $ch . $bg;
-			}
+		# Special handling for the glyph at the moment of release
+        if ($is_user
+				&& ($r->{sym} eq $self->{sym_press})
+				&& $idx < $#$runs
+				&& $runs->[$idx+1]{sym} eq $self->{sym_release}) {
+			$s .= $fg . ($ch x ($n-1));
+			$ch = $self->{viz_symbol_release}{$r->{sym}} // $ch;
+			$s .= $self->{_viz_release_edge_bg_ansi} . $fg . $ch . $bg;
 		} else { # Pattern just gets the similarity color on each run
             $s .= $fg . ($ch x $n);
         }

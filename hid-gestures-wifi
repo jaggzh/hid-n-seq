@@ -29,6 +29,18 @@ my $_ansi_reset = "\e[0m";
 # Global state for cleanup
 my ($mouse_enabled, $server, $recognizer);
 
+# Default fields to show in the visualization lines
+my %viz_display = (
+	name => 1,
+	rel_label => 1,
+	usr_label => 0,  # Now shown on OBS line by default
+	score => 1,
+	weight => 0,
+	type => 1,
+	quotes => 0,
+);
+    
+
 sub main {
     my $patterns = [];
     my $file_dot_ms;
@@ -88,8 +100,8 @@ sub main {
         hard_stop_span_s   => 0.00,
         # keep dot-end guard unless you know you want to commit while still pressed
         require_release_for_dot_end => 1,
+        viz_display => \%viz_display,
     );
-    
     my $idle_tick_s = $quantum_s;
     my $last_feed   = time();
     

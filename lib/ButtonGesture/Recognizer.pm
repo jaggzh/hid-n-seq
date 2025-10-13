@@ -330,6 +330,7 @@ sub _evaluate_if_ready {
         my $obs_is_just_release_after = (@$obs_runs == @{$p->{runs}} + 1 &&
                                           $obs_runs->[-1]{sym} eq $self->{sym_release});
 
+        my ($raw, $perrun_info) = _full_score_variance($obs_runs, $p);
         if (@$obs_runs > @{$p->{runs}} && !($pattern_ends_with_press && $obs_is_just_release_after)) {
 
             # Add to @full for viz, but mark as invalidated
@@ -338,7 +339,7 @@ sub _evaluate_if_ready {
                 score       => 0.0,
                 raw         => 0.0,
                 idx         => $idx,
-                perrun_info => [],
+                perrun_info => $perrun_info,
                 runs_count  => $p->{runs_count},
                 len_total   => $p->{len_total},
                 is_done     => 0,
@@ -348,8 +349,7 @@ sub _evaluate_if_ready {
             next;
         }
 
-        # Full prefix covered: compute score and DONE state
-        my ($raw, $perrun_info) = _full_score_variance($obs_runs, $p);
+        # Full prefix covered: evaluate DONE state
         next if $raw <= 0;
 
         my $final = $raw * ($p->{weight} // 1.0);
@@ -436,7 +436,7 @@ sub _evaluate_if_ready {
     for my $c (@full) {
         my $p = $self->{patterns}[$c->{idx}];
 
-        if ($self->{verbose} >= 2 && $c->{name} eq 'click') {
+        if ($self->{verbose} >= 3 && $c->{name} eq 'click') {
             printf("[DEBUG] Checking click: invalidated=%s obs_runs=%d pat_runs=%d is_done=%s peak_done=%.3f\n",
                    ($c->{invalidated} ? 'YES' : 'NO'),
                    scalar(@$obs_runs), scalar(@{$p->{runs}}),
@@ -464,7 +464,7 @@ sub _evaluate_if_ready {
         }
     }
 
-    if ($self->{verbose} >= 2) {
+    if ($self->{verbose} >= 3) {
         printf("[DEBUG] best_done_idx=%d best_done_score=%.3f threshold=%.3f\n",
                $best_done_idx, $best_done_score, $threshold);
     }
@@ -491,7 +491,7 @@ sub _evaluate_if_ready {
             $ub_competitors = $ub_w_j if $ub_w_j > $ub_competitors;
         }
 
-        if ($self->{verbose} >= 2) {
+        if ($self->{verbose} >= 3) {
             printf("[DEBUG] ub_competitors=%.3f patience=%.3f\n",
                    $ub_competitors, $patience);
         }
@@ -533,7 +533,7 @@ sub _evaluate_if_ready {
                 $hold_max = $val if $val > $hold_max;
             }
 
-            if ($self->{verbose} >= 2) {
+            if ($self->{verbose} >= 3) {
                 printf("[DEBUG] superset hold_max=%.3f hold_th=%.3f (blocking=%s)\n",
                        $hold_max, $hold_th, ($hold_max >= $hold_th ? "YES" : "NO"));
             }
@@ -542,7 +542,7 @@ sub _evaluate_if_ready {
             return if $hold_max >= $hold_th;
         }
 
-        if ($self->{verbose} >= 2) {
+        if ($self->{verbose} >= 3) {
             printf("[DEBUG] Final check: %.3f >= %.3f + %.3f? (%s)\n",
                    $best_done_score, $ub_competitors, $margin,
                    ($best_done_score >= $ub_competitors + $margin ? "YES->COMMIT" : "NO->WAIT"));
@@ -1108,11 +1108,11 @@ sub _build_pattern_line {
     if ($self->{viz_display}{score}) {
         my $score_str;
         if ($kind eq 'UB') {
-            $score_str = sprintf("UB=%.3f", $c->{score});
+            $score_str = sprintf("   UB=%.3f   ", $c->{score});
         } elsif ($c->{invalidated}) {
-            $score_str = "score=0.000 INV";
+            $score_str = "score=0.000 INV    ";
         } else {
-            $score_str = sprintf("score=%.3f", $c->{score});
+            $score_str = sprintf("score=%.3f   ", $c->{score});
         }
         push @parts, $score_str;
         $prefix_width += length($score_str) + 1;

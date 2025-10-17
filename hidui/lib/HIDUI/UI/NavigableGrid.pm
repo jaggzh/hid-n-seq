@@ -158,7 +158,7 @@ sub _highlight_current {
     
     # Remove highlight from all buttons
     for my $button (@{$self->{buttons}}) {
-        $button->configure(-background => 'SystemButtonFace');
+        $button->configure(-background => 'grey90');
     }
     
     # Highlight current button

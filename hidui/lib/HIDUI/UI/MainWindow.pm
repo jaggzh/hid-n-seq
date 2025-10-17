@@ -185,7 +185,7 @@ sub _build_info_panel {
         -justify => 'left'
     )->pack(-anchor => 'w', -padx => 10);
     
-    $self->{info_frame}->Frame(-height => 10)->pack();  # Spacer
+    $self->{info_frame}->Frame(-height => 1)->pack();  # Spacer
     
     # Active preset info
     $self->{info_frame}->Label(
@@ -198,7 +198,7 @@ sub _build_info_panel {
         -justify => 'left'
     )->pack(-anchor => 'w', -padx => 10);
     
-    $self->{info_frame}->Frame(-height => 10)->pack();  # Spacer
+    $self->{info_frame}->Frame(-height => 1)->pack();  # Spacer
     
     # Quick assignments info
     $self->{info_frame}->Label(

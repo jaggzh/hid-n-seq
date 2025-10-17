@@ -4,9 +4,8 @@ package HIDUI::EventServer;
 use strict;
 use warnings;
 use IO::Socket::INET;
-use Tk;
+use IO::Select;
 
-# Constructor
 sub new {
     my ($class, %args) = @_;
     
@@ -19,7 +18,7 @@ sub new {
         port => $port,
         host => $host,
         socket => undef,
-        clients => [],
+        select => undef,
     };
     
     bless $self, $class;
@@ -27,10 +26,8 @@ sub new {
     return $self;
 }
 
-# Start listening for events
-# Must be called after at least one Tk window exists
 sub start {
-    my ($self) = @_;
+    my ($self, $main_window) = @_;
     
     # Create listening socket
     $self->{socket} = IO::Socket::INET->new(
@@ -39,48 +36,30 @@ sub start {
         Proto => 'tcp',
         Listen => 5,
         ReuseAddr => 1,
-    ) or die "Cannot create socket: $!";
+    ) or die "Cannot create socket on $$self{host}:$$self{port}: $!";
+    
+    $self->{socket}->blocking(0);
+    $self->{select} = IO::Select->new($self->{socket});
     
     print "HIDUI EventServer listening on $$self{host}:$$self{port}\n";
     
-    # Make socket non-blocking
-    $self->{socket}->blocking(0);
-    
-    # Use Tk's repeating timer to poll the socket
-    # This is more portable than fileevent
-    $self->_setup_polling();
+    # Use the actual MainWindow's repeat method
+    $main_window->repeat(50, sub { $self->_poll() });
 }
 
-# Internal: Setup polling timer
-sub _setup_polling {
+sub _poll {
     my ($self) = @_;
     
-    # Poll every 50ms for incoming connections
-    my $timer;
-    $timer = sub {
-        $self->_check_for_connections();
-        Tk->after(50, $timer);
-    };
+    my @ready = $self->{select}->can_read(0);
+    return unless @ready;
     
-    Tk->after(50, $timer);
-}
-
-# Internal: Check for incoming connections (non-blocking)
-sub _check_for_connections {
-    my ($self) = @_;
-    
-    return unless $self->{socket};
-    
-    # Try to accept (non-blocking)
     my $client = $self->{socket}->accept();
     return unless $client;
     
-    # Read event name from client
     my $event_name = <$client>;
-    
     if (defined $event_name) {
         chomp $event_name;
-        $event_name =~ s/\s+$//;  # Strip trailing whitespace
+        $event_name =~ s/\s+$//;
         
         if ($event_name ne '') {
             print "Received event: $event_name\n";
@@ -91,14 +70,9 @@ sub _check_for_connections {
     close $client;
 }
 
-# Stop listening
 sub stop {
     my ($self) = @_;
-    
-    if ($self->{socket}) {
-        close $self->{socket};
-        $self->{socket} = undef;
-    }
+    close $self->{socket} if $self->{socket};
 }
 
 1;

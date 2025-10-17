@@ -1,19 +1,16 @@
 #!/usr/bin/perl
-
-use strict;
-use warnings;
+use v5.36;
 use FindBin;
 use Carp 'confess';
 $SIG{__DIE__} = sub { confess @_ };
 
 use lib "$FindBin::Bin/lib";
-
 use Getopt::Long;
 use HIDUI::Core;
 use HIDUI::UI::Manager;
 use HIDUI::EventServer;
+use Tk;
 
-# Parse command line options
 my $config_dir = "$FindBin::Bin/config";
 my $port = 9876;
 my $enable_server = 1;
@@ -24,10 +21,8 @@ GetOptions(
     'server!' => \$enable_server,
 ) or die "Usage: $0 [--config DIR] [--port PORT] [--no-server]\n";
 
-# Initialize HIDUI
 my $hidui = HIDUI::Core->new(config_dir => $config_dir);
 
-# Register any custom actions here
 $hidui->register_action(
     id => 'custom_scroll_down',
     label => 'Custom: Scroll Down 10x',
@@ -38,31 +33,26 @@ $hidui->register_action(
     }
 );
 
-# Initialize UI (this creates the hidden MainWindow)
 my $ui_manager = HIDUI::UI::Manager->new(core => $hidui);
+
+# Create a MainWindow for Tk event loop (hidden)
+my $mw = MainWindow->new();
+$mw->withdraw();
 
 print "HIDUI initialized.\n";
 
-# Start TCP event server if requested
-# Must happen AFTER UI manager creates a Tk window
 if ($enable_server) {
     my $event_server = HIDUI::EventServer->new(
         core => $hidui,
         port => $port
     );
     
-    # Start server (Tk is now initialized via UI::Manager)
-    $event_server->start();
-
-    print "Event server listening on localhost:$port\n";
-    print "Gesture recognizer will send events here.\n";
-} else {
-    print "Event server disabled (--no-server)\n";
+    $event_server->start($mw);
+    print "Event server ready on localhost:$port\n";
 }
 
-print "\nHIDUI ready. Waiting for events...\n";
+print "HIDUI ready. Waiting for events...\n";
 
-# Start Tk event loop
 $hidui->run();
 
 # vim: et ts=4 sts=4 sw=4

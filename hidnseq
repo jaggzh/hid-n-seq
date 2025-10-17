@@ -56,6 +56,12 @@ sub main {
         [ 'port|p=i'        => "Listen port ($def_port) (implies -N)", {
             implies => 'net'
         }],
+        [],
+        [ 'Mouse button choice for --tui mode' ],
+        [ 'lmb'             => "Use Left-Mouse-Button" ],
+        [ 'mmb'             => "Use Middle-Mouse-Button (default)" ],
+        [ 'rmb'             => "Use Right-Mouse-Button" ],
+        [],
         [ 'tui'             => "Text UI only (no HIDUI, for testing gestures)" ],
         [ 'hidui-port=i'    => "HIDUI event port ($def_hidui_port)" ],
         [ 'quantum-s|q=f'    => "Smallest resolution of sensing durations (seconds, float ($def_quantum_s)",
@@ -66,6 +72,7 @@ sub main {
         [ 'help|h'      => "Show this help", { shortcircuit => 1 } ],
     );
     print($usage->text), exit if $opt->help;
+    my $watch_btn = $opt->lmb ? 0 : $opt->rmb ? 2 : 1; # 1 is mmb
     
     $verbose = $opt->verbose;
     my $use_net = 0;
@@ -199,7 +206,7 @@ sub main {
                 }
                 if ($seq =~ /\e\[<(\d+);(\d+);(\d+)([Mm])/) {
                     my ($btn, $x, $y, $state) = ($1, $2, $3, $4);
-                    if ($btn == 0) {
+                    if ($btn == $watch_btn) {
                         if ($state eq 'M') {
                             $recognizer->press(time());
                         } else {
@@ -321,7 +328,7 @@ sub start_hidui {
     my $ready = 0;
     
     for my $attempt (1 .. $max_tries) {
-        sleep 0.5;
+        usleep(500000);
         
         # Try to connect
         my $test_sock = IO::Socket::INET->new(

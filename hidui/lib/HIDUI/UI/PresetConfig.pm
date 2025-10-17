@@ -207,7 +207,7 @@ sub _highlight_current_event {
     
     # Remove highlight from all
     for my $label (values %{$self->{event_labels}}) {
-        $label->configure(-background => 'SystemButtonFace');
+        $label->configure(-background => 'grey90');
     }
     
     # Highlight current

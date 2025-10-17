@@ -80,7 +80,7 @@ sub _build_window {
     # Create toplevel window
     $self->{toplevel} = MainWindow->new();
     $self->{toplevel}->title('HIDUI - Main');
-    $self->{toplevel}->geometry('600x500');
+    $self->{toplevel}->geometry('800x500');
     
     # Hide initially
     $self->{toplevel}->withdraw();

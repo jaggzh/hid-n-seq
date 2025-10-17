@@ -5,6 +5,8 @@ vi:
 		lib/HIDUI/Core.pm \
 		lib/HIDUI/Config.pm \
 		lib/HIDUI/EventMapper.pm \
+		lib/HIDUI/EventClient.pm \
+		lib/HIDUI/EventServer.pm \
 		lib/HIDUI/UI/MainWindow.pm \
 		lib/HIDUI/UI/Manager.pm \
 		lib/HIDUI/UI/NavigableGrid.pm \

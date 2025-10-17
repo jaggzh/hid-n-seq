@@ -19,7 +19,7 @@ sub new {
         port => $port,
         host => $host,
         socket => undef,
-        tk_fileevent => undef,
+        clients => [],
     };
     
     bless $self, $class;
@@ -28,6 +28,7 @@ sub new {
 }
 
 # Start listening for events
+# Must be called after at least one Tk window exists
 sub start {
     my ($self) = @_;
     
@@ -45,17 +46,32 @@ sub start {
     # Make socket non-blocking
     $self->{socket}->blocking(0);
     
-    # Register with Tk's event loop to watch for connections
-    $self->{tk_fileevent} = $self->{core}{ui}{main_window}{toplevel}->fileevent(
-        $self->{socket}, 'readable',
-        sub { $self->_handle_connection() }
-    );
+    # Use Tk's repeating timer to poll the socket
+    # This is more portable than fileevent
+    $self->_setup_polling();
 }
 
-# Internal: Handle incoming connection
-sub _handle_connection {
+# Internal: Setup polling timer
+sub _setup_polling {
     my ($self) = @_;
     
+    # Poll every 50ms for incoming connections
+    my $timer;
+    $timer = sub {
+        $self->_check_for_connections();
+        Tk->after(50, $timer);
+    };
+    
+    Tk->after(50, $timer);
+}
+
+# Internal: Check for incoming connections (non-blocking)
+sub _check_for_connections {
+    my ($self) = @_;
+    
+    return unless $self->{socket};
+    
+    # Try to accept (non-blocking)
     my $client = $self->{socket}->accept();
     return unless $client;
     
@@ -105,7 +121,7 @@ HIDUI::EventServer - TCP server for receiving gesture events
 =head1 DESCRIPTION
 
 Listens for TCP connections and forwards event names to HIDUI core.
-Integrates with Tk's event loop using fileevent.
+Integrates with Tk's event loop using a polling timer.
 
 =cut
 

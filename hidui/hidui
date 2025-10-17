@@ -38,35 +38,29 @@ $hidui->register_action(
     }
 );
 
-# Initialize UI
+# Initialize UI (this creates the hidden MainWindow)
 my $ui_manager = HIDUI::UI::Manager->new(core => $hidui);
 
+print "HIDUI initialized.\n";
+
 # Start TCP event server if requested
-my $event_server;
+# Must happen AFTER UI manager creates a Tk window
 if ($enable_server) {
-    $event_server = HIDUI::EventServer->new(
+    my $event_server = HIDUI::EventServer->new(
         core => $hidui,
         port => $port
     );
+    
+    # Start server (Tk is now initialized via UI::Manager)
     $event_server->start();
-}
 
-print "HIDUI initialized.\n";
-print "Waiting for gesture events...\n";
-print "\nTo test manually, you can call:\n";
-print "  \$hidui->event('longlongpress');  # Open main UI\n";
-print "  \$hidui->event('click');           # Desktop: left click (or UI: navigate)\n";
-print "  \$hidui->event('doubleclick');     # Desktop: right click (or UI: activate)\n";
-print "\n";
-
-if ($enable_server) {
     print "Event server listening on localhost:$port\n";
-    print "Send events via TCP, e.g.: echo 'longlongpress' | nc localhost $port\n";
+    print "Gesture recognizer will send events here.\n";
 } else {
     print "Event server disabled (--no-server)\n";
 }
 
-print "\nWaiting for events...\n";
+print "\nHIDUI ready. Waiting for events...\n";
 
 # Start Tk event loop
 $hidui->run();

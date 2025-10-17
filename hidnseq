@@ -147,7 +147,8 @@ sub main {
         $mouse_enabled = 1;
         
         # Clear screen and show instructions
-        print "\e[2J\e[H";  # Clear screen and move to top
+        # print "\e[2J\e[H";  # Clear screen and move to top
+        print "\n" x 5;
         print "=" x 60 . "\n";
         print "Mouse Gesture Recognizer Test\n";
         if ($tui_mode) {
@@ -302,7 +303,7 @@ sub start_hidui {
     
     if ($hidui_pid == 0) {
         # Child process - exec HIDUI
-        my $hidui_script = "$FindBin::Bin/hidui/main.pl";
+        my $hidui_script = "$FindBin::Bin/hidui/hidui";
         
         unless (-x $hidui_script) {
             die "HIDUI script not found or not executable: $hidui_script\n";
@@ -312,11 +313,35 @@ sub start_hidui {
         die "Failed to exec HIDUI: $!\n";
     }
     
-    # Parent process - wait for HIDUI to start
+    # Parent process - wait for HIDUI to start and be ready
     print "Starting HIDUI (PID: $hidui_pid) on port $port...\n";
-    sleep 2;  # Give HIDUI time to initialize
     
-    print "HIDUI ready.\n";
+    # Wait for HIDUI to actually be listening
+    my $max_tries = 20;  # 10 seconds max
+    my $ready = 0;
+    
+    for my $attempt (1 .. $max_tries) {
+        sleep 0.5;
+        
+        # Try to connect
+        my $test_sock = IO::Socket::INET->new(
+            PeerHost => 'localhost',
+            PeerPort => $port,
+            Proto => 'tcp',
+            Timeout => 1,
+        );
+        
+        if ($test_sock) {
+            close $test_sock;
+            $ready = 1;
+            print "HIDUI ready after $attempt attempt(s).\n";
+            last;
+        }
+    }
+    
+    unless ($ready) {
+        warn "WARNING: HIDUI may not be ready (couldn't connect to port $port)\n";
+    }
 }
 
 # Send event to HIDUI
@@ -325,23 +350,21 @@ sub send_to_hidui {
     
     return unless defined $event_name && $event_name ne '';
     
-    # Reuse connection or create new one
-    unless ($hidui_client && $hidui_client->connected) {
-        $hidui_client = IO::Socket::INET->new(
-            PeerHost => 'localhost',
-            PeerPort => $port,
-            Proto => 'tcp',
-            Timeout => 1,
-        );
-        
-        unless ($hidui_client) {
-            warn "Cannot connect to HIDUI on port $port: $!\n";
-            return 0;
-        }
+    # Create fresh connection each time (simpler and more reliable)
+    my $client = IO::Socket::INET->new(
+        PeerHost => 'localhost',
+        PeerPort => $port,
+        Proto => 'tcp',
+        Timeout => 2,
+    );
+    
+    unless ($client) {
+        warn "Cannot connect to HIDUI on port $port: $!\n";
+        return 0;
     }
     
-    print $hidui_client "$event_name\n";
-    $hidui_client->flush();
+    print $client "$event_name\n";
+    close $client;
     
     return 1;
 }

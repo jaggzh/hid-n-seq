@@ -238,3 +238,4 @@ Window for configuring event-to-action mappings for presets.
 MVP version allows navigation through events; action selection to be enhanced.
 
 =cut
+# vim: et ts=4 sts=4 sw=4

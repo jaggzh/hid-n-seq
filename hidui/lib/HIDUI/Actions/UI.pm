@@ -5,7 +5,7 @@ use warnings;
 
 # Register all UI control actions with the registry
 sub register_all {
-    my ($registry) = @_;
+    my ($class, $registry) = @_;
     
     # Main UI window actions
     $registry->register(
@@ -213,3 +213,4 @@ HIDUI::Actions::UI - UI control and navigation actions
 Provides actions for controlling HIDUI windows and navigating within them.
 
 =cut
+# vim: et ts=4 sts=4 sw=4

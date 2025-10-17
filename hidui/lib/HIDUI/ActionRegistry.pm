@@ -163,3 +163,4 @@ Manages registration and execution of action handlers. Actions can be
 grouped for easier navigation in UI.
 
 =cut
+# vim: et ts=4 sts=4 sw=4

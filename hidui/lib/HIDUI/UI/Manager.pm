@@ -137,3 +137,4 @@ Coordinates between different UI windows (main, preset config, etc.)
 and manages which window is currently active.
 
 =cut
+# vim: et ts=4 sts=4 sw=4

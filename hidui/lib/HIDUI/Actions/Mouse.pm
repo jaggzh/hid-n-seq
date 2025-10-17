@@ -5,7 +5,7 @@ use warnings;
 
 # Register all mouse actions with the registry
 sub register_all {
-    my ($registry) = @_;
+    my ($class, $registry) = @_;
     
     $registry->register(
         id => 'mouse_left_click',
@@ -97,3 +97,4 @@ HIDUI::Actions::Mouse - Mouse simulation actions
 Provides mouse click and scroll actions using xdotool.
 
 =cut
+# vim: et ts=4 sts=4 sw=4

@@ -1,10 +1,12 @@
-#!/usr/bin/env perl
+#!/usr/bin/perl
 
 use strict;
 use warnings;
 use FindBin;
-use lib "$FindBin::Bin/lib";
+use Carp 'confess';
+$SIG{__DIE__} = sub { confess @_ };
 
+use lib "$FindBin::Bin/lib";
 use HIDUI::Core;
 use HIDUI::UI::Manager;
 
@@ -56,3 +58,4 @@ print "\n";
 
 # Start Tk event loop
 $hidui->run();
+# vim: et ts=4 sts=4 sw=4

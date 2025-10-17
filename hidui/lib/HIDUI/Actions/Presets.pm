@@ -5,7 +5,7 @@ use warnings;
 
 # Register preset management actions
 sub register_all {
-    my ($registry) = @_;
+    my ($class, $registry) = @_;
     
     $registry->register(
         id => 'preset_switch',
@@ -62,3 +62,4 @@ HIDUI::Actions::Presets - Preset management actions
 Provides actions for switching between presets.
 
 =cut
+# vim: et ts=4 sts=4 sw=4

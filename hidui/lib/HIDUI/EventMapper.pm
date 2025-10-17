@@ -155,3 +155,4 @@ Resolves event names to action IDs using priority:
   4. Active preset mappings
 
 =cut
+# vim: et ts=4 sts=4 sw=4

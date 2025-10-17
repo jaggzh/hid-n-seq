@@ -5,7 +5,7 @@ use warnings;
 
 # Register all keyboard actions with the registry
 sub register_all {
-    my ($registry) = @_;
+    my ($class, $registry) = @_;
     
     # Basic keys
     $registry->register(
@@ -124,3 +124,4 @@ HIDUI::Actions::Keyboard - Keyboard simulation actions
 Provides keyboard key press actions using xdotool.
 
 =cut
+# vim: et ts=4 sts=4 sw=4

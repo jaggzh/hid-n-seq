@@ -201,3 +201,4 @@ Handles loading defaults.json and user.json, merging them, and
 providing access to configuration data.
 
 =cut
+# vim: et ts=4 sts=4 sw=4

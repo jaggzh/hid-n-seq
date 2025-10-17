@@ -327,3 +327,4 @@ HIDUI::UI::MainWindow - Main UI window
 The main navigation UI that displays presets and quick actions.
 
 =cut
+# vim: et ts=4 sts=4 sw=4

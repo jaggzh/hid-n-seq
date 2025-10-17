@@ -178,3 +178,4 @@ Core coordinator that ties together config, actions, event mapping,
 and UI. Provides the main event() method that gesture callbacks invoke.
 
 =cut
+# vim: et ts=4 sts=4 sw=4

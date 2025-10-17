@@ -1,0 +1,58 @@
+#!/usr/bin/env perl
+
+use strict;
+use warnings;
+use FindBin;
+use lib "$FindBin::Bin/lib";
+
+use HIDUI::Core;
+use HIDUI::UI::Manager;
+
+# Initialize HIDUI
+my $hidui = HIDUI::Core->new(config_dir => "$FindBin::Bin/config");
+
+# Register any custom actions here
+$hidui->register_action(
+    id => 'custom_scroll_down',
+    label => 'Custom: Scroll Down 10x',
+    group => 'custom_actions',
+    handler => sub {
+        my ($core, $event, $action, $params) = @_;
+        system('xdotool', 'key', '--repeat', '10', 'Down');
+    }
+);
+
+# Initialize UI
+my $ui_manager = HIDUI::UI::Manager->new(core => $hidui);
+
+# Example: Simulate gesture events for testing
+# In real use, this would come from your hid-n-seq gesture module
+# 
+# For testing, you can uncomment these lines to simulate events:
+#
+# $hidui->{toplevel}->after(1000, sub {
+#     print "Simulating longlongpress event...\n";
+#     $hidui->event('longlongpress');  # Should open main UI
+# });
+
+print "HIDUI initialized.\n";
+print "Waiting for gesture events...\n";
+print "\nTo test manually, you can call:\n";
+print "  \$hidui->event('longlongpress');  # Open main UI\n";
+print "  \$hidui->event('click');           # Desktop: left click (or UI: navigate)\n";
+print "  \$hidui->event('doubleclick');     # Desktop: right click (or UI: activate)\n";
+print "\n";
+
+# In your actual hid-n-seq integration, you would do something like:
+#
+# use HidNSeq;  # Your gesture module
+#
+# my $gesture = HidNSeq->new(...);
+# $gesture->on_event(sub {
+#     my $event_name = shift;
+#     print "Received event: $event_name\n";
+#     $hidui->event($event_name);
+# });
+
+# Start Tk event loop
+$hidui->run();

@@ -1,0 +1,161 @@
+{
+  "ui_layout": {
+    "main_window": {
+      "initial_section": "presets_row1",
+      "remember_position": true,
+      "sections": [
+        {
+          "id": "presets",
+          "label": "Presets",
+          "rows": [
+            {
+              "id": "presets_row1",
+              "cells": [
+                {
+                  "id": "preset_general",
+                  "label": "General",
+                  "type": "preset",
+                  "preset_id": "preset_general"
+                },
+                {
+                  "id": "preset_gaming",
+                  "label": "Gaming",
+                  "type": "preset",
+                  "preset_id": "preset_gaming"
+                },
+                {
+                  "id": "preset_coding",
+                  "label": "Coding",
+                  "type": "preset",
+                  "preset_id": "preset_coding"
+                }
+              ]
+            },
+            {
+              "id": "presets_row2",
+              "cells": [
+                {
+                  "id": "preset_relaxed",
+                  "label": "Relaxed",
+                  "type": "preset",
+                  "preset_id": "preset_relaxed"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "activities",
+          "label": "Quick Actions",
+          "rows": [
+            {
+              "id": "activities_row1",
+              "cells": [
+                {
+                  "id": "open_preset_config",
+                  "label": "Configure Presets",
+                  "type": "action_button",
+                  "action_id": "open_preset_config"
+                },
+                {
+                  "id": "quick_assign",
+                  "label": "Quick Assign",
+                  "type": "action_button",
+                  "action_id": "open_quick_assign"
+                }
+              ]
+            },
+            {
+              "id": "activities_row2",
+              "cells": [
+                {
+                  "id": "close_ui",
+                  "label": "Close UI",
+                  "type": "action_button",
+                  "action_id": "close_current_window"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  
+  "presets": {
+    "preset_general": {
+      "label": "General Use",
+      "events": {
+        "click": "mouse_left_click",
+        "doubleclick": "mouse_right_click",
+        "mediumpress": "mouse_middle_click",
+        "longpress": "key_enter",
+        "longlongpress": "open_main_ui"
+      }
+    },
+    "preset_gaming": {
+      "label": "Gaming",
+      "events": {
+        "click": "key_space",
+        "doubleclick": "key_enter",
+        "mediumpress": "key_escape",
+        "longpress": "key_tab",
+        "longlongpress": "open_main_ui"
+      }
+    },
+    "preset_coding": {
+      "label": "Coding",
+      "events": {
+        "click": "mouse_left_click",
+        "doubleclick": "mouse_right_click",
+        "mediumpress": "key_tab",
+        "longpress": "key_escape",
+        "longlongpress": "open_main_ui"
+      }
+    },
+    "preset_relaxed": {
+      "label": "Relaxed Mode",
+      "events": {
+        "click": "key_down",
+        "doubleclick": "key_up",
+        "mediumpress": "key_space",
+        "longpress": "key_enter",
+        "longlongpress": "open_main_ui"
+      }
+    }
+  },
+  
+  "active_preset": "preset_general",
+  
+  "quick_assignments": {
+    "transient": {},
+    "sticky": {}
+  },
+  
+  "event_mappings": {
+    "desktop_mode": {},
+    "main_ui": {
+      "click": "ui_navigate_next",
+      "doubleclick": "ui_activate_current",
+      "mediumpress": "ui_navigate_prev",
+      "longpress": "close_current_window"
+    },
+    "preset_config": {
+      "click": "config_next_event",
+      "doubleclick": "config_select_action",
+      "mediumpress": "config_prev_event",
+      "longpress": "config_close"
+    }
+  },
+  
+  "settings": {
+    "style_mode": "dark"
+  },
+  
+  "ui_state": {
+    "main_window_position": {
+      "section": "presets_row1",
+      "cell_index": 0
+    }
+  }
+}

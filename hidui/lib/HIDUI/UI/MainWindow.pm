@@ -2,9 +2,16 @@ package HIDUI::UI::MainWindow;
 
 use strict;
 use warnings;
+use utf8;
 use Tk;
 use HIDUI::UI::NavigableGrid;
-use utf8;
+
+# UI Styling Configuration
+my $FONT_SIZE_HEADING = 14;
+my $FONT_SIZE_TEXT = 12;
+
+my $COLOR_EVENT = '#a000b0';    # Purple - for event names like "click", "doubleclick"
+my $COLOR_ACTION = '#000090';   # Blue - for action names like "mouse_left_click"
 
 # Constructor
 sub new {
@@ -17,9 +24,10 @@ sub new {
         toplevel => undef,
         grid => undef,
         info_frame => undef,
-        highlighted_label => undef,
-        active_label => undef,
-        quick_label => undef,
+        ui_help_text => undef,
+        highlighted_text => undef,
+        active_text => undef,
+        quick_text => undef,
     };
     
     bless $self, $class;
@@ -93,7 +101,7 @@ sub _build_window {
     # Title label
     $main_frame->Label(
         -text => 'HIDUI - Single Button Interface',
-        -font => ['helvetica', 14, 'bold']
+        -font => ['helvetica', $FONT_SIZE_HEADING, 'bold']
     )->pack(-pady => 5);
     
     # Build cell list from config
@@ -175,10 +183,10 @@ sub _build_info_panel {
         -relief => 'sunken'
     )->pack(-fill => 'both', -expand => 1, -pady => 5);
     
-    # UI Help section
+    # ===== UI Help Section =====
     $self->{info_frame}->Label(
         -text => 'UI Controls:',
-        -font => ['helvetica', 14, 'bold']
+        -font => ['helvetica', $FONT_SIZE_HEADING, 'bold']
     )->pack(-anchor => 'w');
     
     $self->{ui_help_text} = $self->{info_frame}->Text(
@@ -186,17 +194,27 @@ sub _build_info_panel {
         -wrap => 'word',
         -relief => 'flat',
         -background => $self->{info_frame}->cget('-background'),
-        -font => ['helvetica', 14]
+        -font => ['helvetica', $FONT_SIZE_TEXT]
     )->pack(-anchor => 'w', -padx => 10, -fill => 'x');
-    $self->{ui_help_text}->tagConfigure('event', -foreground => '#a000b0', -font => ['helvetica', 12, 'bold']);
-    $self->{ui_help_text}->tagConfigure('action', -foreground => '#000090', -font => ['helvetica', 12, 'bold', 'italic']);
     
-    $self->{info_frame}->Frame(-height => 1)->pack();
+    # Tag: event name (e.g., "click", "doubleclick")
+    $self->{ui_help_text}->tagConfigure('event',
+        -foreground => $COLOR_EVENT,
+        -font => ['helvetica', $FONT_SIZE_TEXT, 'bold']
+    );
     
-    # Highlighted preset info
+    # Tag: action name (e.g., "ui_navigate_next", "mouse_left_click")
+    $self->{ui_help_text}->tagConfigure('action',
+        -foreground => $COLOR_ACTION,
+        -font => ['helvetica', $FONT_SIZE_TEXT, 'bold', 'italic']
+    );
+    
+    $self->{info_frame}->Frame(-height => 1)->pack();  # Spacer
+    
+    # ===== Highlighted Preset Section =====
     $self->{info_frame}->Label(
         -text => 'Currently Highlighted:',
-        -font => ['helvetica', 14, 'bold']
+        -font => ['helvetica', $FONT_SIZE_HEADING, 'bold']
     )->pack(-anchor => 'w');
     
     $self->{highlighted_text} = $self->{info_frame}->Text(
@@ -204,17 +222,27 @@ sub _build_info_panel {
         -wrap => 'word',
         -relief => 'flat',
         -background => $self->{info_frame}->cget('-background'),
-        -font => ['helvetica', 12]
+        -font => ['helvetica', $FONT_SIZE_TEXT]
     )->pack(-anchor => 'w', -padx => 10, -fill => 'x');
-    $self->{highlighted_text}->tagConfigure('event', -foreground => '#a000b0', -font => ['helvetica', 9, 'bold']);
-    $self->{highlighted_text}->tagConfigure('action', -foreground => '#000090', -font => ['helvetica', 9, 'bold', 'italic']);
     
-    $self->{info_frame}->Frame(-height => 1)->pack();
+    # Tag: event name (e.g., "click", "doubleclick")
+    $self->{highlighted_text}->tagConfigure('event',
+        -foreground => $COLOR_EVENT,
+        -font => ['helvetica', $FONT_SIZE_TEXT, 'bold']
+    );
     
-    # Active preset info
+    # Tag: action name (e.g., "mouse_left_click", "key_space")
+    $self->{highlighted_text}->tagConfigure('action',
+        -foreground => $COLOR_ACTION,
+        -font => ['helvetica', $FONT_SIZE_TEXT, 'bold', 'italic']
+    );
+    
+    $self->{info_frame}->Frame(-height => 1)->pack();  # Spacer
+    
+    # ===== Active Preset Section =====
     $self->{info_frame}->Label(
         -text => 'Active Preset:',
-        -font => ['helvetica', 14, 'bold']
+        -font => ['helvetica', $FONT_SIZE_HEADING, 'bold']
     )->pack(-anchor => 'w');
     
     $self->{active_text} = $self->{info_frame}->Text(
@@ -222,17 +250,27 @@ sub _build_info_panel {
         -wrap => 'word',
         -relief => 'flat',
         -background => $self->{info_frame}->cget('-background'),
-        -font => ['helvetica', 12]
+        -font => ['helvetica', $FONT_SIZE_TEXT]
     )->pack(-anchor => 'w', -padx => 10, -fill => 'x');
-    $self->{active_text}->tagConfigure('event', -foreground => '#a000b0', -font => ['helvetica', 12, 'bold']);
-    $self->{active_text}->tagConfigure('action', -foreground => '#000090', -font => ['helvetica', 12, 'bold', 'italic']);
     
-    $self->{info_frame}->Frame(-height => 1)->pack();
+    # Tag: event name (e.g., "click", "longpress")
+    $self->{active_text}->tagConfigure('event',
+        -foreground => $COLOR_EVENT,
+        -font => ['helvetica', $FONT_SIZE_TEXT, 'bold']
+    );
     
-    # Quick assignments info
+    # Tag: action name (e.g., "mouse_left_click", "open_main_ui")
+    $self->{active_text}->tagConfigure('action',
+        -foreground => $COLOR_ACTION,
+        -font => ['helvetica', $FONT_SIZE_TEXT, 'bold', 'italic']
+    );
+    
+    $self->{info_frame}->Frame(-height => 1)->pack();  # Spacer
+    
+    # ===== Quick Assignments Section =====
     $self->{info_frame}->Label(
         -text => 'Quick Assignments:',
-        -font => ['helvetica', 14, 'bold']
+        -font => ['helvetica', $FONT_SIZE_HEADING, 'bold']
     )->pack(-anchor => 'w');
     
     $self->{quick_text} = $self->{info_frame}->Text(
@@ -240,10 +278,39 @@ sub _build_info_panel {
         -wrap => 'word',
         -relief => 'flat',
         -background => $self->{info_frame}->cget('-background'),
-        -font => ['helvetica', 12]
+        -font => ['helvetica', $FONT_SIZE_TEXT]
     )->pack(-anchor => 'w', -padx => 10, -fill => 'x');
-    $self->{quick_text}->tagConfigure('event', -foreground => '#a000b0', -font => ['helvetica', 12, 'bold']);
-    $self->{quick_text}->tagConfigure('action', -foreground => '#000090', -font => ['helvetica', 12, 'bold', 'italic']);
+    
+    # Tag: event name (e.g., "click", "mediumpress")
+    $self->{quick_text}->tagConfigure('event',
+        -foreground => $COLOR_EVENT,
+        -font => ['helvetica', $FONT_SIZE_TEXT, 'bold']
+    );
+    
+    # Tag: action name (e.g., "custom_scroll_down")
+    $self->{quick_text}->tagConfigure('action',
+        -foreground => $COLOR_ACTION,
+        -font => ['helvetica', $FONT_SIZE_TEXT, 'bold', 'italic']
+    );
+}
+
+# Internal: Handle cell activation
+sub _handle_cell_activation {
+    my ($self, $cell) = @_;
+    
+    my $type = $cell->{type};
+    
+    if ($type eq 'preset') {
+        # Switch to this preset
+        my $preset_id = $cell->{preset_id};
+        my $params = { preset_id => $preset_id };
+        $self->{core}->registry->execute('preset_switch', $self->{core}, 'activate', $params);
+        
+    } elsif ($type eq 'action_button') {
+        # Execute the action
+        my $action_id = $cell->{action_id};
+        $self->{core}->registry->execute($action_id, $self->{core}, 'activate', {});
+    }
 }
 
 # Update info panels
@@ -405,4 +472,5 @@ HIDUI::UI::MainWindow - Main UI window
 The main navigation UI that displays presets and quick actions.
 
 =cut
+
 # vim: et ts=4 sts=4 sw=4

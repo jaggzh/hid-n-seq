@@ -5,22 +5,55 @@ dot_ms: 20.000
 patterns:
   - id: click
     name: "click"
-    visual: ......................
+    visual: ............
     # visual_numeric: .{15.4}
     weight: 1.000
     description: "Click"
     runs:
-      0: { type: press, variance: 8.442, weight: 1.000, samples: 6 }
+      0: { type: press, variance: 9.442, weight: 1.000, samples: 6 }
+  - id: medium
+    name: "medium"
+    visual: .......................................................
+    # visual_numeric: .{15.4}
+    weight: 1.000
+    description: "Medium"
+    runs:
+      0: { type: press, variance: 16.442, weight: 1.000, samples: 6 }
+  - id: longpress
+    name: "longpress"
+    visual: .................................................................................................................
+    weight: 1.000
+    description: "Long Press"
+    runs:
+      0: { type: press, variance: 26.442, weight: 1.000, samples: 6 }
+  - id: longlongpress
+    name: "longlongpress"
+    visual: .............................................................................................................................................................
+    # visual_numeric: .{15.4}
+    weight: 1.000
+    description: "Very Long Press"
+    runs:
+      0: { type: press, variance: 26.442, weight: 1.000, samples: 6 }
   - id: doubleclick
     name: "doubleclick"
-    visual: ....................~~~~~~~~~~~~~~~~~~~~~~~~~~~~....................
+    visual: ....................~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~....................
     # visual_numeric: .{19.8}~{28.3}.{19.6}
     weight: 1.000
     description: "Double"
     runs:
-      0: { type: press, variance: 5.196, weight: 1.000, samples: 7 }
-      1: { type: release, variance: 7.889, weight: 1.000, samples: 7 }
-      2: { type: press, variance: 4.114, weight: 1.000, samples: 7 }
+      0: { type: press, variance: 18.196, weight: 1.000, samples: 7 }
+      1: { type: release, variance: 20.889, weight: 1.000, samples: 7 }
+      2: { type: press, variance: 17.114, weight: 1.000, samples: 7 }
+  - id: tripleclick
+    name: "tripleclick"
+    visual: ....................~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~....................~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~....................
+    # visual_numeric: .{19.8}~{28.3}.{19.6}
+    weight: 1.000
+    description: "Triple"
+    runs:
+      0: { type: press, variance: 18.196, weight: 1.000, samples: 7 }
+      1: { type: release, variance: 20.889, weight: 1.000, samples: 7 }
+      2: { type: press, variance: 17.114, weight: 1.000, samples: 7 }
 
 # sym_press="." sym_release="~"
 # Edit per-run 'variance' (in dots) and 'weight' to tune tolerance/importance.

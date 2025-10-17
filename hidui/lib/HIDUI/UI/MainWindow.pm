@@ -178,76 +178,72 @@ sub _build_info_panel {
     # UI Help section
     $self->{info_frame}->Label(
         -text => 'UI Controls:',
-        -font => ['helvetica', 10, 'bold']
+        -font => ['helvetica', 14, 'bold']
     )->pack(-anchor => 'w');
     
-    $self->{ui_help_label} = $self->{info_frame}->Text(
-        -text => '',
-        -wrap   => 'word',
-        -justify => 'left',
-        -font => ['helvetica', 9]
-    )->pack(-anchor => 'w', -padx => 10);
+    $self->{ui_help_text} = $self->{info_frame}->Text(
+        -height => 2,
+        -wrap => 'word',
+        -relief => 'flat',
+        -background => $self->{info_frame}->cget('-background'),
+        -font => ['helvetica', 14]
+    )->pack(-anchor => 'w', -padx => 10, -fill => 'x');
+    $self->{ui_help_text}->tagConfigure('event', -foreground => '#a000b0', -font => ['helvetica', 12, 'bold']);
+    $self->{ui_help_text}->tagConfigure('action', -foreground => '#000090', -font => ['helvetica', 12, 'bold', 'italic']);
     
-    $self->{info_frame}->Frame(-height => 1)->pack();  # Spacer
+    $self->{info_frame}->Frame(-height => 1)->pack();
     
     # Highlighted preset info
     $self->{info_frame}->Label(
         -text => 'Currently Highlighted:',
-        -font => ['helvetica', 10, 'bold']
+        -font => ['helvetica', 14, 'bold']
     )->pack(-anchor => 'w');
     
-    $self->{highlighted_label} = $self->{info_frame}->Label(
-        -text => '',
-        -justify => 'left',
-        -font => ['helvetica', 9]
-    )->pack(-anchor => 'w', -padx => 10);
+    $self->{highlighted_text} = $self->{info_frame}->Text(
+        -height => 2,
+        -wrap => 'word',
+        -relief => 'flat',
+        -background => $self->{info_frame}->cget('-background'),
+        -font => ['helvetica', 12]
+    )->pack(-anchor => 'w', -padx => 10, -fill => 'x');
+    $self->{highlighted_text}->tagConfigure('event', -foreground => '#a000b0', -font => ['helvetica', 9, 'bold']);
+    $self->{highlighted_text}->tagConfigure('action', -foreground => '#000090', -font => ['helvetica', 9, 'bold', 'italic']);
     
-    $self->{info_frame}->Frame(-height => 1)->pack();  # Spacer
+    $self->{info_frame}->Frame(-height => 1)->pack();
     
     # Active preset info
     $self->{info_frame}->Label(
         -text => 'Active Preset:',
-        -font => ['helvetica', 10, 'bold']
+        -font => ['helvetica', 14, 'bold']
     )->pack(-anchor => 'w');
     
-    $self->{active_label} = $self->{info_frame}->Label(
-        -text => '',
-        -justify => 'left',
-        -font => ['helvetica', 9]
-    )->pack(-anchor => 'w', -padx => 10);
+    $self->{active_text} = $self->{info_frame}->Text(
+        -height => 2,
+        -wrap => 'word',
+        -relief => 'flat',
+        -background => $self->{info_frame}->cget('-background'),
+        -font => ['helvetica', 12]
+    )->pack(-anchor => 'w', -padx => 10, -fill => 'x');
+    $self->{active_text}->tagConfigure('event', -foreground => '#a000b0', -font => ['helvetica', 12, 'bold']);
+    $self->{active_text}->tagConfigure('action', -foreground => '#000090', -font => ['helvetica', 12, 'bold', 'italic']);
     
-    $self->{info_frame}->Frame(-height => 1)->pack();  # Spacer
+    $self->{info_frame}->Frame(-height => 1)->pack();
     
     # Quick assignments info
     $self->{info_frame}->Label(
         -text => 'Quick Assignments:',
-        -font => ['helvetica', 10, 'bold']
+        -font => ['helvetica', 14, 'bold']
     )->pack(-anchor => 'w');
     
-    $self->{quick_label} = $self->{info_frame}->Label(
-        -text => '',
-        -justify => 'left',
-        -font => ['helvetica', 9]
-    )->pack(-anchor => 'w', -padx => 10);
-}
-
-# Internal: Handle cell activation
-sub _handle_cell_activation {
-    my ($self, $cell) = @_;
-    
-    my $type = $cell->{type};
-    
-    if ($type eq 'preset') {
-        # Switch to this preset
-        my $preset_id = $cell->{preset_id};
-        my $params = { preset_id => $preset_id };
-        $self->{core}->registry->execute('preset_switch', $self->{core}, 'activate', $params);
-        
-    } elsif ($type eq 'action_button') {
-        # Execute the action
-        my $action_id = $cell->{action_id};
-        $self->{core}->registry->execute($action_id, $self->{core}, 'activate', {});
-    }
+    $self->{quick_text} = $self->{info_frame}->Text(
+        -height => 2,
+        -wrap => 'word',
+        -relief => 'flat',
+        -background => $self->{info_frame}->cget('-background'),
+        -font => ['helvetica', 12]
+    )->pack(-anchor => 'w', -padx => 10, -fill => 'x');
+    $self->{quick_text}->tagConfigure('event', -foreground => '#a000b0', -font => ['helvetica', 12, 'bold']);
+    $self->{quick_text}->tagConfigure('action', -foreground => '#000090', -font => ['helvetica', 12, 'bold', 'italic']);
 }
 
 # Update info panels
@@ -264,23 +260,34 @@ sub update_info_panels {
 sub _update_ui_help {
     my ($self) = @_;
     
+    my $text = $self->{ui_help_text};
+    $text->delete('1.0', 'end');
+    
     my $ui_events = $self->{core}->config->get('event_mappings', 'main_ui') // {};
     
-    my @parts;
-    for my $event (sort keys %$ui_events) {
+    my @events = sort keys %$ui_events;
+    return unless @events;
+    
+    for my $i (0 .. $#events) {
+        my $event = $events[$i];
         my $action = $ui_events->{$event};
-        push @parts, "$event → $action";
+        
+        $text->insert('end', $event, 'event');
+        $text->insert('end', ' → ');
+        $text->insert('end', $action, 'action');
+        
+        if ($i < $#events) {
+            $text->insert('end', ' — ');
+        }
     }
-    
-    my $text = join(' — ', @parts);
-    $text = '(None)' if $text eq '';
-    
-    $self->{ui_help_label}->configure(-text => $text);
 }
 
 # Internal: Update highlighted preset info
 sub _update_highlighted_info {
     my ($self) = @_;
+    
+    my $text = $self->{highlighted_text};
+    $text->delete('1.0', 'end');
     
     my $cell = $self->{grid}->get_current_cell();
     
@@ -289,19 +296,26 @@ sub _update_highlighted_info {
         my $preset = $self->{core}->config->get('presets', $preset_id);
         
         if ($preset) {
+            $text->insert('end', $preset->{label} . ': ');
+            
             my $events = $preset->{events} // {};
-            my @parts;
+            my @events = sort keys %$events;
             
-            for my $event (sort keys %$events) {
+            for my $i (0 .. $#events) {
+                my $event = $events[$i];
                 my $action = $events->{$event};
-                push @parts, "$event → $action";
+                
+                $text->insert('end', $event, 'event');
+                $text->insert('end', ' → ');
+                $text->insert('end', $action, 'action');
+                
+                if ($i < $#events) {
+                    $text->insert('end', ' — ');
+                }
             }
-            
-            my $text = $preset->{label} . ': ' . join(' — ', @parts);
-            $self->{highlighted_label}->configure(-text => $text);
         }
     } else {
-        $self->{highlighted_label}->configure(-text => '(Not on a preset)');
+        $text->insert('end', '(Not on a preset)');
     }
 }
 
@@ -309,26 +323,39 @@ sub _update_highlighted_info {
 sub _update_active_info {
     my ($self) = @_;
     
+    my $text = $self->{active_text};
+    $text->delete('1.0', 'end');
+    
     my $active_id = $self->{core}->config->get('active_preset');
     my $preset = $self->{core}->config->get('presets', $active_id);
     
     if ($preset) {
+        $text->insert('end', $preset->{label} . ': ');
+        
         my $events = $preset->{events} // {};
-        my @parts;
+        my @events = sort keys %$events;
         
-        for my $event (sort keys %$events) {
+        for my $i (0 .. $#events) {
+            my $event = $events[$i];
             my $action = $events->{$event};
-            push @parts, "$event → $action";
+            
+            $text->insert('end', $event, 'event');
+            $text->insert('end', ' → ');
+            $text->insert('end', $action, 'action');
+            
+            if ($i < $#events) {
+                $text->insert('end', ' — ');
+            }
         }
-        
-        my $text = $preset->{label} . ': ' . join(' — ', @parts);
-        $self->{active_label}->configure(-text => $text);
     }
 }
 
 # Internal: Update quick assignments info
 sub _update_quick_info {
     my ($self) = @_;
+    
+    my $text = $self->{quick_text};
+    $text->delete('1.0', 'end');
     
     my $sticky = $self->{core}->mapper->get_quick_assignments('sticky');
     my $transient = $self->{core}->mapper->get_quick_assignments('transient');
@@ -337,18 +364,32 @@ sub _update_quick_info {
     
     if (%$sticky) {
         for my $event (sort keys %$sticky) {
-            push @parts, "$event → $$sticky{$event} (sticky)";
+            push @parts, { event => $event, action => $$sticky{$event}, type => 'sticky' };
         }
     }
     
     if (%$transient) {
         for my $event (sort keys %$transient) {
-            push @parts, "$event → $$transient{$event}";
+            push @parts, { event => $event, action => $$transient{$event}, type => 'transient' };
         }
     }
     
-    my $text = @parts ? join(' — ', @parts) : '(None)';
-    $self->{quick_label}->configure(-text => $text);
+    if (@parts) {
+        for my $i (0 .. $#parts) {
+            my $p = $parts[$i];
+            
+            $text->insert('end', $p->{event}, 'event');
+            $text->insert('end', ' → ');
+            $text->insert('end', $p->{action}, 'action');
+            $text->insert('end', " ($p->{type})");
+            
+            if ($i < $#parts) {
+                $text->insert('end', ' — ');
+            }
+        }
+    } else {
+        $text->insert('end', '(None)');
+    }
 }
 
 1;

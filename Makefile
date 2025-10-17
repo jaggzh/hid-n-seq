@@ -2,7 +2,7 @@ vi:
 	vim \
 		Makefile \
 		wifi-gestures.yaml \
-		hid-gestures-wifi \
+		hidnseq \
 		lib/ButtonGesture/Recognizer.pm \
 		hid-learn \
 		\

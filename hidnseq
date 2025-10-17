@@ -16,6 +16,7 @@ my $def_file = "wifi-gestures.yaml";
 # $def_file = "my-gestures.yaml";
 my $def_quantum_s = 0.02;
 my $def_port = 10102;
+my $def_hidui_port = 9876;
 my $verbose = 2;
 sub _ansi_rgb   { return sprintf("\e[38;2;%d;%d;%dm", $_[0], $_[1], $_[2]); }
 sub _ansi_bg    { return sprintf("\e[48;2;%d;%d;%dm", $_[0], $_[1], $_[2]); }
@@ -29,7 +30,7 @@ my $_ansi_score = "\e[33;1m";
 my $_ansi_reset = "\e[0m";
 
 # Global state for cleanup
-my ($mouse_enabled, $server, $recognizer);
+my ($mouse_enabled, $server, $recognizer, $hidui_pid, $hidui_client);
 
 # Default fields to show in the visualization lines
 my %viz_display = (
@@ -41,7 +42,7 @@ my %viz_display = (
 	type => 1,
 	quotes => 0,
 );
-    
+
 
 sub main {
     my $patterns = [];
@@ -55,6 +56,8 @@ sub main {
         [ 'port|p=i'        => "Listen port ($def_port) (implies -N)", {
             implies => 'net'
         }],
+        [ 'tui'             => "Text UI only (no HIDUI, for testing gestures)" ],
+        [ 'hidui-port=i'    => "HIDUI event port ($def_hidui_port)" ],
         [ 'quantum-s|q=f'    => "Smallest resolution of sensing durations (seconds, float ($def_quantum_s)",
             { 'default' => $def_quantum_s, } ],
         [ 'verbose|v+'  => "Increase verbosity each time -v is used",
@@ -68,6 +71,8 @@ sub main {
     my $use_net = 0;
 	$use_net = 1 if $opt->net;
     my $port = $opt->port // $def_port;
+    my $tui_mode = $opt->tui // 0;
+    my $hidui_port = $opt->hidui_port // $def_hidui_port;
     
     if ($opt->gesture_file) {
         die "No such YAML: " . $opt->gesture_file . "\n"
@@ -78,11 +83,16 @@ sub main {
         $patterns = _normalize_patterns($in, '.', '~');   # parse visual (incl. {dots}) → runs[len], merge variance/weight
     }
     
+    # Start HIDUI unless in TUI mode
+    unless ($tui_mode) {
+        start_hidui($hidui_port);
+    }
+    
     my $quantum_s = defined($file_dot_ms) ? ($file_dot_ms / 1000.0) : $opt->quantum_s;
     $recognizer = Recognizer->new(
         verbose    => $verbose,
         quantum_ms => int($quantum_s * 1000 + 0.5),
-        callback   => \&handle_gesture,
+        callback   => sub { handle_gesture(@_, $tui_mode, $hidui_port) },
         patterns   => $patterns,
         commit_threshold   => 0.45,   # still require a strong match
         commit_margin      => 0.018,   # need a bigger lead over any continuation
@@ -124,6 +134,11 @@ sub main {
         
         print "=" x 60 . "\n";
         print "Gesture Recognizer (Network Mode)\n";
+        if ($tui_mode) {
+            print "(TUI Mode - No HIDUI)\n";
+        } else {
+            print "(Sending events to HIDUI on port $hidui_port)\n";
+        }
         print "=" x 60 . "\n";
         print "Listening on port: $port\n";
     } else {
@@ -135,6 +150,11 @@ sub main {
         print "\e[2J\e[H";  # Clear screen and move to top
         print "=" x 60 . "\n";
         print "Mouse Gesture Recognizer Test\n";
+        if ($tui_mode) {
+            print "(TUI Mode - No HIDUI)\n";
+        } else {
+            print "(Sending events to HIDUI on port $hidui_port)\n";
+        }
         print "=" x 60 . "\n";
     }
     
@@ -142,6 +162,9 @@ sub main {
     print "Available gestures:\n";
 	# Need to retrieve from yaml and display to user
 	# eg. print "  - click: description...\n";
+	for my $p (@$patterns) {
+		print "  - " . $p->{name} . "\n";
+	}
     print "\n";
     
     if ($use_net) {
@@ -265,6 +288,64 @@ sub main {
     }
 }
 
+# Start HIDUI in background
+sub start_hidui {
+    my ($port) = @_;
+    
+    # Fork and start HIDUI
+    $hidui_pid = fork();
+    
+    if (!defined $hidui_pid) {
+        warn "Failed to fork HIDUI process: $!\n";
+        return;
+    }
+    
+    if ($hidui_pid == 0) {
+        # Child process - exec HIDUI
+        my $hidui_script = "$FindBin::Bin/hidui/main.pl";
+        
+        unless (-x $hidui_script) {
+            die "HIDUI script not found or not executable: $hidui_script\n";
+        }
+        
+        exec($^X, $hidui_script, "--port", $port);
+        die "Failed to exec HIDUI: $!\n";
+    }
+    
+    # Parent process - wait for HIDUI to start
+    print "Starting HIDUI (PID: $hidui_pid) on port $port...\n";
+    sleep 2;  # Give HIDUI time to initialize
+    
+    print "HIDUI ready.\n";
+}
+
+# Send event to HIDUI
+sub send_to_hidui {
+    my ($event_name, $port) = @_;
+    
+    return unless defined $event_name && $event_name ne '';
+    
+    # Reuse connection or create new one
+    unless ($hidui_client && $hidui_client->connected) {
+        $hidui_client = IO::Socket::INET->new(
+            PeerHost => 'localhost',
+            PeerPort => $port,
+            Proto => 'tcp',
+            Timeout => 1,
+        );
+        
+        unless ($hidui_client) {
+            warn "Cannot connect to HIDUI on port $port: $!\n";
+            return 0;
+        }
+    }
+    
+    print $hidui_client "$event_name\n";
+    $hidui_client->flush();
+    
+    return 1;
+}
+
 # Non-blocking stdin check for network mode
 sub _check_stdin {
     use IO::Select;
@@ -278,7 +359,7 @@ sub _check_stdin {
 }
 
 sub handle_gesture {
-    my ($gesture_name, $score, $meta) = @_;
+    my ($gesture_name, $score, $meta, $tui_mode, $hidui_port) = @_;
     my $when = ($meta && exists $meta->{t_end}) ? $meta->{t_end} : time();
     if ($gesture_name && $gesture_name eq 'NO_MATCH') {
         print "\nNo match (reset)\n";
@@ -287,6 +368,15 @@ sub handle_gesture {
         my $score_s = defined($score) ? sprintf('%.3f',$score) : '—';
         print "\nMatched: $_ansi_matched $gesture_name $_ansi_reset  score=$_ansi_score$score_s$_ansi_reset\n";
         print "at: $when  ---  ";
+        
+        # Send to HIDUI unless in TUI mode
+        unless ($tui_mode) {
+            if (send_to_hidui($gesture_name, $hidui_port)) {
+                print "[Sent to HIDUI] ";
+            } else {
+                print "[HIDUI send failed] ";
+            }
+        }
     }
     print "(q) or Ctrl-C to quit\n";
 }
@@ -300,6 +390,14 @@ sub cleanup {
     if ($server) {
         $server->close();
         print "\nServer closed. Exiting.\n";
+    }
+    if ($hidui_client) {
+        $hidui_client->close();
+    }
+    if ($hidui_pid) {
+        print "Shutting down HIDUI (PID: $hidui_pid)...\n";
+        kill 'TERM', $hidui_pid;
+        waitpid($hidui_pid, 0);
     }
     exit;
 }
@@ -377,3 +475,5 @@ sub _parse_visual_to_runs ($visual, $sym_press, $sym_release) {
 }
 
 main();
+
+# vim: et ts=4 sts=4 sw=4

@@ -4,6 +4,7 @@ use strict;
 use warnings;
 use Tk;
 use HIDUI::UI::NavigableGrid;
+use utf8;
 
 # Constructor
 sub new {
@@ -174,6 +175,21 @@ sub _build_info_panel {
         -relief => 'sunken'
     )->pack(-fill => 'both', -expand => 1, -pady => 5);
     
+    # UI Help section
+    $self->{info_frame}->Label(
+        -text => 'UI Controls:',
+        -font => ['helvetica', 10, 'bold']
+    )->pack(-anchor => 'w');
+    
+    $self->{ui_help_label} = $self->{info_frame}->Text(
+        -text => '',
+        -wrap   => 'word',
+        -justify => 'left',
+        -font => ['helvetica', 9]
+    )->pack(-anchor => 'w', -padx => 10);
+    
+    $self->{info_frame}->Frame(-height => 1)->pack();  # Spacer
+    
     # Highlighted preset info
     $self->{info_frame}->Label(
         -text => 'Currently Highlighted:',
@@ -182,7 +198,8 @@ sub _build_info_panel {
     
     $self->{highlighted_label} = $self->{info_frame}->Label(
         -text => '',
-        -justify => 'left'
+        -justify => 'left',
+        -font => ['helvetica', 9]
     )->pack(-anchor => 'w', -padx => 10);
     
     $self->{info_frame}->Frame(-height => 1)->pack();  # Spacer
@@ -195,7 +212,8 @@ sub _build_info_panel {
     
     $self->{active_label} = $self->{info_frame}->Label(
         -text => '',
-        -justify => 'left'
+        -justify => 'left',
+        -font => ['helvetica', 9]
     )->pack(-anchor => 'w', -padx => 10);
     
     $self->{info_frame}->Frame(-height => 1)->pack();  # Spacer
@@ -208,7 +226,8 @@ sub _build_info_panel {
     
     $self->{quick_label} = $self->{info_frame}->Label(
         -text => '',
-        -justify => 'left'
+        -justify => 'left',
+        -font => ['helvetica', 9]
     )->pack(-anchor => 'w', -padx => 10);
 }
 
@@ -235,9 +254,28 @@ sub _handle_cell_activation {
 sub update_info_panels {
     my ($self) = @_;
     
+    $self->_update_ui_help();
     $self->_update_highlighted_info();
     $self->_update_active_info();
     $self->_update_quick_info();
+}
+
+# Internal: Update UI help text
+sub _update_ui_help {
+    my ($self) = @_;
+    
+    my $ui_events = $self->{core}->config->get('event_mappings', 'main_ui') // {};
+    
+    my @parts;
+    for my $event (sort keys %$ui_events) {
+        my $action = $ui_events->{$event};
+        push @parts, "$event → $action";
+    }
+    
+    my $text = join(' — ', @parts);
+    $text = '(None)' if $text eq '';
+    
+    $self->{ui_help_label}->configure(-text => $text);
 }
 
 # Internal: Update highlighted preset info
@@ -251,14 +289,15 @@ sub _update_highlighted_info {
         my $preset = $self->{core}->config->get('presets', $preset_id);
         
         if ($preset) {
-            my $text = $preset->{label} . "\n";
             my $events = $preset->{events} // {};
+            my @parts;
             
             for my $event (sort keys %$events) {
                 my $action = $events->{$event};
-                $text .= "  $event -> $action\n";
+                push @parts, "$event → $action";
             }
             
+            my $text = $preset->{label} . ': ' . join(' — ', @parts);
             $self->{highlighted_label}->configure(-text => $text);
         }
     } else {
@@ -274,14 +313,15 @@ sub _update_active_info {
     my $preset = $self->{core}->config->get('presets', $active_id);
     
     if ($preset) {
-        my $text = $preset->{label} . "\n";
         my $events = $preset->{events} // {};
+        my @parts;
         
         for my $event (sort keys %$events) {
             my $action = $events->{$event};
-            $text .= "  $event -> $action\n";
+            push @parts, "$event → $action";
         }
         
+        my $text = $preset->{label} . ': ' . join(' — ', @parts);
         $self->{active_label}->configure(-text => $text);
     }
 }
@@ -293,24 +333,21 @@ sub _update_quick_info {
     my $sticky = $self->{core}->mapper->get_quick_assignments('sticky');
     my $transient = $self->{core}->mapper->get_quick_assignments('transient');
     
-    my $text = '';
+    my @parts;
     
     if (%$sticky) {
-        $text .= "Sticky:\n";
         for my $event (sort keys %$sticky) {
-            $text .= "  $event -> $$sticky{$event}\n";
+            push @parts, "$event → $$sticky{$event} (sticky)";
         }
     }
     
     if (%$transient) {
-        $text .= "Transient:\n";
         for my $event (sort keys %$transient) {
-            $text .= "  $event -> $$transient{$event}\n";
+            push @parts, "$event → $$transient{$event}";
         }
     }
     
-    $text = '(None)' if $text eq '';
-    
+    my $text = @parts ? join(' — ', @parts) : '(None)';
     $self->{quick_label}->configure(-text => $text);
 }
 

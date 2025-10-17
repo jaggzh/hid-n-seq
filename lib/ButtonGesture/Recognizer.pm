@@ -358,7 +358,7 @@ sub _evaluate_if_ready {
         }
 
         # Full prefix covered: evaluate DONE state
-        next if $raw <= 0;
+        # next if $raw <= 0;  // REMOVED - let all patterns display
 
         my $final = $raw * ($p->{weight} // 1.0);
         my $is_done = $self->_pattern_is_done($obs_runs, $p, $last_kind);
@@ -586,11 +586,21 @@ sub _evaluate_if_ready {
                     my $p = $self->{patterns}[$c->{idx}];
                     next if @$obs_runs > @{$p->{runs}};  # Skip exceeded patterns
 
-                    # Check if pattern ends with press and has viable score/UB
+                    # Check if pattern ends with press and has viable UB or peak_done
                     if (($p->{runs}[-1]{sym} // '') eq $self->{sym_press}) {
-                        if ($c->{score} >= $threshold || $c->{is_done}) {
-                            $has_viable_dot_pattern = 1;
-                            last;
+                        if ($c->{is_done}) {
+                            # For DONE patterns, check peak score
+                            if ($c->{peak_done} >= $threshold) {
+                                $has_viable_dot_pattern = 1;
+                                last;
+                            }
+                        } else {
+                            # For patterns still in progress, check UB potential
+                            my ($ub_raw, undef) = $self->_prefix_ub_with_perrun($obs_runs, $p);
+                            if ($ub_raw >= $threshold) {
+                                $has_viable_dot_pattern = 1;
+                                last;
+                            }
                         }
                     }
                 }

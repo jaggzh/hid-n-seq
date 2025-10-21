@@ -34,6 +34,11 @@ sub new {
     
     $self->_build_window();
     
+    $self->{toplevel}->bind('<FocusIn>', sub {
+        $self->{core}->mapper->set_mode('main_ui');
+        $self->{core}->ui->{current_window} = 'main';
+    });
+
     return $self;
 }
 

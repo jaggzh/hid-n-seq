@@ -3,6 +3,8 @@ package HIDUI::UI::Manager;
 use strict;
 use warnings;
 use Tk;
+use HIDUI::UI::MainWindow;
+use HIDUI::UI::PresetConfig;
 
 # Constructor
 sub new {
@@ -58,7 +60,6 @@ sub show_main_window {
     
     # Create window if it doesn't exist
     unless ($self->{main_window}) {
-        require HIDUI::UI::MainWindow;
         $self->{main_window} = HIDUI::UI::MainWindow->new(core => $self->{core});
     }
     
@@ -89,7 +90,6 @@ sub show_preset_config {
     
     # Create window if it doesn't exist
     unless ($self->{preset_config}) {
-        require HIDUI::UI::PresetConfig;
         $self->{preset_config} = HIDUI::UI::PresetConfig->new(core => $self->{core});
     }
     

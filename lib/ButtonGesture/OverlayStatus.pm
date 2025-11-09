@@ -78,7 +78,7 @@ sub new {
         scale_factor => $scale_factor,
         pattern_spacing_y => $pattern_spacing_y,
         pattern_colors => $pattern_colors,
-        user_press_color => [235, 60, 255],
+        user_press_color => [255, 235, 255],
         user_release_color => [0, 0, 0],
         _is_dragging => 0,
         _start_x => undef,
@@ -145,7 +145,7 @@ sub _draw_patterns {
                     $x_pos + $width, $y_offset + $row_height,
                     -fill => $color,
                     -outline => '',
-                    -stipple => 'gray50',  # Approximate 50% opacity
+                    -stipple => 'gray75',  # Approximate 50% opacity
                     -tags => ['pattern', "pattern_$i"],
                 );
             }

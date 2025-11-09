@@ -138,7 +138,7 @@ sub main {
             patterns => $recognizer->{patterns},  # Use precomputed patterns
             quantum_s => $quantum_s,
             width_px => 200,
-            height_px => 50,
+            height_px => 30,
             debug => 1,
         );
         # Now set the overlay callback on the recognizer

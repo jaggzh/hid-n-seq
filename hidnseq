@@ -15,7 +15,8 @@ use Term::ReadKey;
 my $def_file = "wifi-gestures.yaml";
 # $def_file = "my-gestures.yaml";
 my $def_quantum_s = 0.02;
-my $def_port = 10102;
+my $def_port = 10101;
+my $def_hidui_port = 9876;
 my $verbose = 2;
 sub _ansi_rgb   { return sprintf("\e[38;2;%d;%d;%dm", $_[0], $_[1], $_[2]); }
 sub _ansi_bg    { return sprintf("\e[48;2;%d;%d;%dm", $_[0], $_[1], $_[2]); }
@@ -29,7 +30,7 @@ my $_ansi_score = "\e[33;1m";
 my $_ansi_reset = "\e[0m";
 
 # Global state for cleanup
-my ($mouse_enabled, $server, $recognizer);
+my ($mouse_enabled, $server, $recognizer, $hidui_pid, $hidui_client);
 
 # Default fields to show in the visualization lines
 my %viz_display = (
@@ -41,7 +42,7 @@ my %viz_display = (
 	type => 1,
 	quotes => 0,
 );
-    
+
 
 sub main {
     my $patterns = [];
@@ -55,7 +56,18 @@ sub main {
         [ 'port|p=i'        => "Listen port ($def_port) (implies -N)", {
             implies => 'net'
         }],
-        [ 'quantum-s|q=f'    => "Smallest resolution of sensing durations (seconds, float ($def_quantum_s)",
+        [],
+        [ 'Mouse button choice for --tui mode' ],
+        [ 'lmb'             => "Use Left-Mouse-Button" ],
+        [ 'mmb'             => "Use Middle-Mouse-Button (default)" ],
+        [ 'rmb'             => "Use Right-Mouse-Button" ],
+        [],
+        [ 'tui'             => "Text UI only (no HIDUI, for testing gestures)" ],
+        [ 'no-hidui'        => "No HIDUI (but still in net-button mode)" ],
+        [ 'no-overlay'      => "Disable visual overlay status window" ],
+        [ 'hardcoded'       => "Use hard-coded event mappings here in hidnseq (disables hidui)" ],
+        [ 'hidui-port=i'    => "HIDUI event port ($def_hidui_port)" ],
+        [ 'quantum-s|q=f'   => "Smallest resolution of sensing durations (seconds, float ($def_quantum_s)",
             { 'default' => $def_quantum_s, } ],
         [ 'verbose|v+'  => "Increase verbosity each time -v is used",
             { 'default' => $verbose, } ],
@@ -63,12 +75,18 @@ sub main {
         [ 'help|h'      => "Show this help", { shortcircuit => 1 } ],
     );
     print($usage->text), exit if $opt->help;
-    
+    my $watch_btn = $opt->lmb ? 0 : $opt->rmb ? 2 : 1; # 1 is mmb
+
     $verbose = $opt->verbose;
     my $use_net = 0;
 	$use_net = 1 if $opt->net;
     my $port = $opt->port // $def_port;
-    
+    my $tui_mode = $opt->tui // 0;
+    my $hidui_mode = !$opt->no_hidui;
+    my $hidui_port = $opt->hidui_port // $def_hidui_port;
+    my $hardcoded = $opt->hardcoded // 0;
+    $hidui_mode = !$hardcoded;
+
     if ($opt->gesture_file) {
         die "No such YAML: " . $opt->gesture_file . "\n"
             unless -f $opt->gesture_file;
@@ -77,12 +95,17 @@ sub main {
         my $in = ref($raw) eq 'HASH' ? ($raw->{patterns} // $raw->{gestures} // []) : $raw;
         $patterns = _normalize_patterns($in, '.', '~');   # parse visual (incl. {dots}) → runs[len], merge variance/weight
     }
-    
+
     my $quantum_s = defined($file_dot_ms) ? ($file_dot_ms / 1000.0) : $opt->quantum_s;
+
+    # Create recognizer FIRST (this precomputes patterns including len_total)
+    # used by overlay.
     $recognizer = Recognizer->new(
         verbose    => $verbose,
         quantum_ms => int($quantum_s * 1000 + 0.5),
-        callback   => \&handle_gesture,
+        callback   => sub { handle_gesture(@_, $tui_mode, $hidui_port, $hardcoded) },
+        # Can't set overlay_update yet
+        #overlay_update => $overlay ? sub { $overlay->update(@_) } : undef,
         patterns   => $patterns,
         commit_threshold   => 0.45,   # still require a strong match
         commit_margin      => 0.018,   # need a bigger lead over any continuation
@@ -105,13 +128,36 @@ sub main {
         viz_display => \%viz_display,
         viz_scale => .75,
     );
+
+    # Create overlay with precomputed patterns from recognizer
+    my $overlay;
+    unless ($opt->no_overlay) {
+        require ButtonGesture::OverlayStatus;
+        ButtonGesture::OverlayStatus->import();
+        $overlay = ButtonGesture::OverlayStatus->new(
+            patterns => $recognizer->{patterns},  # Use precomputed patterns
+            quantum_s => $quantum_s,
+            width_px => 200,
+            height_px => 30,
+            debug => 1,
+        );
+        # Now set the overlay callback on the recognizer
+        $recognizer->{overlay_update} = sub { $overlay->update(@_) };
+    }
+
+    # Start HIDUI unless in TUI mode
+    # unless ($tui_mode && !$hidui_mode) {
+    if (!$tui_mode && $hidui_mode) {
+        start_hidui($hidui_port);
+    }
+
     my $idle_tick_s = $quantum_s;
     my $last_feed   = time();
-    
+
     # Mode-specific setup
     my ($sel_net, $client);
 	ReadMode('cbreak');
-    
+
     if ($use_net) {
         # Network mode
         $server = IO::Socket::INET->new(
@@ -121,44 +167,59 @@ sub main {
             Reuse     => 1,
         ) or die "Cannot create socket on port $port: $!\n";
         $sel_net = IO::Select->new($server);
-        
+
         print "=" x 60 . "\n";
         print "Gesture Recognizer (Network Mode)\n";
+        if ($tui_mode) {
+            print "(TUI Mode - No HIDUI)\n";
+        } else {
+            print "(Sending events to HIDUI on port $hidui_port)\n";
+        }
         print "=" x 60 . "\n";
         print "Listening on port: $port\n";
     } else {
         # Mouse mode (default)
         print "\e[?1000;1003;1006h";  # enable full mouse tracking
         $mouse_enabled = 1;
-        
+
         # Clear screen and show instructions
-        print "\e[2J\e[H";  # Clear screen and move to top
+        # print "\e[2J\e[H";  # Clear screen and move to top
+        print "\n" x 5;
         print "=" x 60 . "\n";
         print "Mouse Gesture Recognizer Test\n";
+        if ($tui_mode) {
+            print "(TUI Mode - No HIDUI)\n";
+        } else {
+            print "(Sending events to HIDUI on port $hidui_port)\n";
+        }
         print "=" x 60 . "\n";
     }
-    
+
     # Common display
+    say "Using gesture file: ", $opt->gesture_file;
     print "Available gestures:\n";
 	# Need to retrieve from yaml and display to user
 	# eg. print "  - click: description...\n";
+	for my $p (@$patterns) {
+		print "  - " . $p->{name} . "\n";
+	}
     print "\n";
-    
+
     if ($use_net) {
         print "Waiting for network connection. Press 'q' or Ctrl-C to quit.\n";
     } else {
         print "Left-click anywhere to test gestures. Press 'q' or Ctrl-C to quit.\n";
     }
     print "-" x 60 . "\n\n";
-    
+
     # Setup signal handler for clean exit
     $SIG{INT} = sub { cleanup() };
-    
+
     my $last_update = time();
     while (1) {
         # Always check for keyboard input (works in both modes)
         my $c = ReadKey(-1);
-        
+
         if (defined $c) {
             if ($c eq "q") {
                 say "QUIT";
@@ -175,7 +236,7 @@ sub main {
                 }
                 if ($seq =~ /\e\[<(\d+);(\d+);(\d+)([Mm])/) {
                     my ($btn, $x, $y, $state) = ($1, $2, $3, $4);
-                    if ($btn == 0) {
+                    if ($btn == $watch_btn) {
                         if ($state eq 'M') {
                             $recognizer->press(time());
                         } else {
@@ -186,11 +247,11 @@ sub main {
                 }
             }
         }
-        
+
         if ($use_net) {
             # Network mode: handle connections
             my @ready = $sel_net->can_read(0.001);
-            
+
             foreach my $fh (@ready) {
                 if ($fh == $server) {
                     # New connection
@@ -208,11 +269,11 @@ sub main {
                         $client = undef if $fh == $client;
                         next;
                     }
-                    
+
                     chomp($line);
                     $line =~ s/\r//g;
                     $line =~ s/^\s+|\s+$//g;
-                    
+
                     # Parse pat-press or pat-release
                     if ($line =~ /^pat-press/) {
                         $recognizer->press(time());
@@ -250,19 +311,107 @@ sub main {
                             $last_feed = time();
                         }
                     } else {
-                        last if $next =~ /[A-Za-z~]$/;
+                        # Ignore other finalized term sequences that we don't care about
+                        if ($next =~ /[A-Za-z~]$/) {
+                            # my $seqshow = $seq; $seqshow =~ s/\033/^[/g; say "SEQ: {{$seqshow}}";
+                            $seq = '';
+                            next;
+                        }
                     }
                 }
             }
         }
-        
+
         if (time() - $last_feed >= $idle_tick_s) {
             $recognizer->tick(time());
             $last_feed = time();
         }
-        
+
+        # Process Tk events for overlay
+        $overlay->process_events() if $overlay;
+
         usleep(1000);
     }
+}
+
+# Start HIDUI in background
+sub start_hidui {
+    my ($port) = @_;
+
+    # Fork and start HIDUI
+    $hidui_pid = fork();
+
+    if (!defined $hidui_pid) {
+        warn "Failed to fork HIDUI process: $!\n";
+        return;
+    }
+
+    if ($hidui_pid == 0) {
+        # Child process - exec HIDUI
+        my $hidui_script = "$FindBin::Bin/hidui/hidui";
+
+        unless (-x $hidui_script) {
+            die "HIDUI script not found or not executable: $hidui_script\n";
+        }
+
+        exec($^X, $hidui_script, "--port", $port);
+        die "Failed to exec HIDUI: $!\n";
+    }
+
+    # Parent process - wait for HIDUI to start and be ready
+    print "Starting HIDUI (PID: $hidui_pid) on port $port...\n";
+
+    # Wait for HIDUI to actually be listening
+    my $max_tries = 20;  # 10 seconds max
+    my $ready = 0;
+
+    for my $attempt (1 .. $max_tries) {
+        usleep(500000);
+
+        # Try to connect
+        my $test_sock = IO::Socket::INET->new(
+            PeerHost => 'localhost',
+            PeerPort => $port,
+            Proto => 'tcp',
+            Timeout => 1,
+        );
+
+        if ($test_sock) {
+            close $test_sock;
+            $ready = 1;
+            print "HIDUI ready after $attempt attempt(s).\n";
+            last;
+        }
+    }
+
+    unless ($ready) {
+        warn "WARNING: HIDUI may not be ready (couldn't connect to port $port)\n";
+    }
+}
+
+# Send event to HIDUI
+sub send_to_hidui {
+    my ($event_name, $port) = @_;
+
+    return unless defined $event_name && $event_name ne '';
+
+    # Create fresh connection each time (simpler and more reliable)
+    my $client = IO::Socket::INET->new(
+        PeerHost => 'localhost',
+        PeerPort => $port,
+        Proto => 'tcp',
+        Timeout => 2,
+    );
+
+    unless ($client) {
+        warn "Cannot connect to HIDUI on port $port: $!\n";
+        return 0;
+    }
+
+    print $client "$event_name\n";
+    close $client;
+
+    return 1;
 }
 
 # Non-blocking stdin check for network mode
@@ -271,14 +420,14 @@ sub _check_stdin {
     state $sel = IO::Select->new(\*STDIN);
     my @ready = $sel->can_read(0);
     return undef unless @ready;
-    
+
     my $c;
     sysread(STDIN, $c, 1);
     return $c;
 }
 
 sub handle_gesture {
-    my ($gesture_name, $score, $meta) = @_;
+    my ($gesture_name, $score, $meta, $tui_mode, $hidui_port, $hardcoded) = @_;
     my $when = ($meta && exists $meta->{t_end}) ? $meta->{t_end} : time();
     if ($gesture_name && $gesture_name eq 'NO_MATCH') {
         print "\nNo match (reset)\n";
@@ -287,6 +436,30 @@ sub handle_gesture {
         my $score_s = defined($score) ? sprintf('%.3f',$score) : '—';
         print "\nMatched: $_ansi_matched $gesture_name $_ansi_reset  score=$_ansi_score$score_s$_ansi_reset\n";
         print "at: $when  ---  ";
+        if ($hardcoded) {
+            if ($gesture_name eq 'click') {
+                `xdotool key Up`;
+            } elsif ($gesture_name eq 'doubleclick') {
+                `xdotool key Up`;
+            } elsif ($gesture_name eq 'tripleclick') {
+                for my $i (0 .. 10) {
+                    `xdotool key Down`;
+                }
+            } elsif ($gesture_name eq 'longpress') {
+                for my $i (0 .. 10) {
+                    `xdotool key Up`;
+                }
+            }
+        } else {
+            # Send to HIDUI if we're not doing TUI test mode (no gui)
+            if (!$tui_mode) {
+                if (send_to_hidui($gesture_name, $hidui_port)) {
+                    print "[Sent to HIDUI] ";
+                } else {
+                    print "[HIDUI send failed] ";
+                }
+            }
+        }
     }
     print "(q) or Ctrl-C to quit\n";
 }
@@ -300,6 +473,14 @@ sub cleanup {
     if ($server) {
         $server->close();
         print "\nServer closed. Exiting.\n";
+    }
+    if ($hidui_client) {
+        $hidui_client->close();
+    }
+    if ($hidui_pid) {
+        print "Shutting down HIDUI (PID: $hidui_pid)...\n";
+        kill 'TERM', $hidui_pid;
+        waitpid($hidui_pid, 0);
     }
     exit;
 }
@@ -377,3 +558,5 @@ sub _parse_visual_to_runs ($visual, $sym_press, $sym_release) {
 }
 
 main();
+
+# vim: et ts=4 sts=4 sw=4

@@ -100,6 +100,8 @@ sub new {
         default_var_press   => defined $a{default_var_press}   ? 0.0 + $a{default_var_press}   : 1.0,
         default_var_release => defined $a{default_var_release} ? 0.0 + $a{default_var_release} : 2.0,
         default_run_weight  => defined $a{default_run_weight}  ? 0.0 + $a{default_run_weight}  : 1.0,
+        # overlay callback (optional)
+        overlay_update      => $a{overlay_update},
         # inputs/runtime
         patterns            => $a{patterns} || [],
         callback            => $a{callback},
@@ -142,6 +144,10 @@ sub reset {
     $self->{_expecting_press} = 1;  # Reset to expecting press
     # clear per-pattern peak_done each fresh observation
     for my $p (@{$self->{patterns}}) { $p->{_peak_done} = 0.0; $p->{_ever_done} = 0; }
+    # clear overlay if present
+    if ($self->{overlay_update}) {
+        $self->{overlay_update}->([]);
+    }
 }
 
 # Runtime display toggle
@@ -312,6 +318,11 @@ sub _evaluate_if_ready {
     );
     return unless @$obs_runs;
 
+    # Update overlay if callback provided
+    if ($self->{overlay_update}) {
+        $self->{overlay_update}->($obs_runs);
+    }
+
     my $obs_key = join(',', map { $_->{sym} . $_->{len} } @$obs_runs);
     if (defined $self->{_last_obs_key} && $self->{_last_obs_key} eq $obs_key) {
         return;  # No change, skip evaluation
@@ -358,7 +369,7 @@ sub _evaluate_if_ready {
         }
 
         # Full prefix covered: evaluate DONE state
-        next if $raw <= 0;
+        # next if $raw <= 0;  // REMOVED - let all patterns display
 
         my $final = $raw * ($p->{weight} // 1.0);
         my $is_done = $self->_pattern_is_done($obs_runs, $p, $last_kind);
@@ -586,11 +597,21 @@ sub _evaluate_if_ready {
                     my $p = $self->{patterns}[$c->{idx}];
                     next if @$obs_runs > @{$p->{runs}};  # Skip exceeded patterns
 
-                    # Check if pattern ends with press and has viable score/UB
+                    # Check if pattern ends with press and has viable UB or peak_done
                     if (($p->{runs}[-1]{sym} // '') eq $self->{sym_press}) {
-                        if ($c->{score} >= $threshold || $c->{is_done}) {
-                            $has_viable_dot_pattern = 1;
-                            last;
+                        if ($c->{is_done}) {
+                            # For DONE patterns, check peak score
+                            if ($c->{peak_done} >= $threshold) {
+                                $has_viable_dot_pattern = 1;
+                                last;
+                            }
+                        } else {
+                            # For patterns still in progress, check UB potential
+                            my ($ub_raw, undef) = $self->_prefix_ub_with_perrun($obs_runs, $p);
+                            if ($ub_raw >= $threshold) {
+                                $has_viable_dot_pattern = 1;
+                                last;
+                            }
                         }
                     }
                 }

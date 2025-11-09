@@ -1,0 +1,58 @@
+#!/usr/bin/perl
+use v5.36;
+use FindBin;
+use Carp 'confess';
+$SIG{__DIE__} = sub { confess @_ };
+
+use lib "$FindBin::Bin/lib";
+use Getopt::Long;
+use HIDUI::Core;
+use HIDUI::UI::Manager;
+use HIDUI::EventServer;
+use Tk;
+
+my $config_dir = "$FindBin::Bin/config";
+my $port = 9876;
+my $enable_server = 1;
+
+GetOptions(
+    'config=s' => \$config_dir,
+    'port=i' => \$port,
+    'server!' => \$enable_server,
+) or die "Usage: $0 [--config DIR] [--port PORT] [--no-server]\n";
+
+my $hidui = HIDUI::Core->new(config_dir => $config_dir);
+
+$hidui->register_action(
+    id => 'custom_scroll_down',
+    label => 'Custom: Scroll Down 10x',
+    group => 'custom_actions',
+    handler => sub {
+        my ($core, $event, $action, $params) = @_;
+        system('xdotool', 'key', '--repeat', '10', 'Down');
+    }
+);
+
+my $ui_manager = HIDUI::UI::Manager->new(core => $hidui);
+
+# Create a MainWindow for Tk event loop (hidden)
+my $mw = MainWindow->new();
+$mw->withdraw();
+
+print "HIDUI initialized.\n";
+
+if ($enable_server) {
+    my $event_server = HIDUI::EventServer->new(
+        core => $hidui,
+        port => $port
+    );
+    
+    $event_server->start($mw);
+    print "Event server ready on localhost:$port\n";
+}
+
+print "HIDUI ready. Waiting for events...\n";
+
+$hidui->run();
+
+# vim: et ts=4 sts=4 sw=4

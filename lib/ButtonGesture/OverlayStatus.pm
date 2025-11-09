@@ -64,16 +64,35 @@ sub new {
         pattern_colors => $pattern_colors,
         user_press_color => [235, 60, 255],
         user_release_color => [0, 0, 0],
-        _drag_x => undef,
-        _drag_y => undef,
+        _is_dragging => 0,
+        _start_x => undef,
+        _start_y => undef,
+        _win_x => undef,
+        _win_y => undef,
     }, $class;
     
     # Draw pattern backgrounds
     $self->_draw_patterns();
     
-    # Setup drag bindings
-    $canvas->bind('<Button-1>', sub { $self->_start_drag(@_) });
-    $canvas->bind('<B1-Motion>', sub { $self->_do_drag(@_) });
+    # Setup drag bindings (using absolute screen coordinates)
+    $mw->bind('<ButtonPress-1>', sub {
+        $self->{_is_dragging} = 1;
+        $self->{_start_x} = $mw->pointerx;
+        $self->{_start_y} = $mw->pointery;
+        $self->{_win_x} = $mw->rootx;
+        $self->{_win_y} = $mw->rooty;
+    });
+    
+    $mw->bind('<Motion>', sub {
+        return unless $self->{_is_dragging};
+        my $delta_x = $mw->pointerx - $self->{_start_x};
+        my $delta_y = $mw->pointery - $self->{_start_y};
+        $mw->geometry(sprintf("+%d+%d", $self->{_win_x} + $delta_x, $self->{_win_y} + $delta_y));
+    });
+
+    $mw->bind('<ButtonRelease-1>', sub {
+        $self->{_is_dragging} = 0;
+    });
     
     return $self;
 }
@@ -116,6 +135,13 @@ sub _draw_patterns {
 sub update {
     my ($self, $obs_runs) = @_;
     
+    # If empty array, only clear if we're not showing a completed gesture
+    if (!$obs_runs || !@$obs_runs) {
+        # Don't clear immediately - this is likely a reset after completion
+        # The overlay will clear naturally when the next gesture starts
+        return;
+    }
+
     # Delete previous user overlay
     $self->{canvas}->delete('user_overlay');
     
@@ -161,33 +187,17 @@ sub update {
 }
 
 sub clear {
-    my ($self) = @_;
+    my ($self, $force) = @_;
+    # Only clear if forced (like on program exit or explicit clear request)
+    return unless $force;
+
     $self->{canvas}->delete('user_overlay');
     $self->{canvas}->update();
 }
 
-sub _start_drag {
-    my ($self, $widget) = @_;
-    my $e = $widget->XEvent;
-    $self->{_drag_x} = $e->x;
-    $self->{_drag_y} = $e->y;
-    say "HELLO! Drag start!"
-}
-
-sub _do_drag {
-    my ($self, $widget) = @_;
-    my $e = $widget->XEvent;
-    say "DO DRAG!";
-    
-    return unless defined $self->{_drag_x} && defined $self->{_drag_y};
-    
-    my $dx = $e->x - $self->{_drag_x};
-    my $dy = $e->y - $self->{_drag_y};
-    
-    my $x = $self->{mw}->x + $dx;
-    my $y = $self->{mw}->y + $dy;
-    
-    $self->{mw}->geometry("+$x+$y");
+sub process_events {
+    my ($self) = @_;
+    $self->{mw}->update();  # Process all pending Tk events
 }
 
 1;

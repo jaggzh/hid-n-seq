@@ -107,7 +107,7 @@ sub main {
             patterns => $patterns,
             quantum_s => $quantum_s,
             width_px => 200,
-            height_px => 20,
+            height_px => 50,
         );
     }
 
@@ -319,7 +319,10 @@ sub main {
             $recognizer->tick(time());
             $last_feed = time();
         }
-
+        
+        # Process Tk events for overlay
+        $overlay->process_events() if $overlay;
+        
         usleep(1000);
     }
 }

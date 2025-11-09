@@ -108,6 +108,7 @@ sub main {
             quantum_s => $quantum_s,
             width_px => 200,
             height_px => 50,
+            debug => 1,
         );
     }
 

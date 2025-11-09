@@ -4,6 +4,9 @@ use strict;
 use warnings;
 use Tk;
 use List::Util qw(max);
+use Data::Dumper;
+
+sub ppd($d) { print Dumper($d) }
 
 sub new {
     my ($class, %args) = @_;
@@ -13,6 +16,7 @@ sub new {
     my $width_px = $args{width_px} // 200;
     my $height_px = $args{height_px} // 10;
     my $pattern_spacing_y = $args{pattern_spacing_y_px} // 1;
+    $DB::single=1;
     
     # Calculate max pattern length for scaling
     my $max_pattern_time_s = 0;
@@ -25,14 +29,26 @@ sub new {
     
     # Scale factor: patterns use 1/1.2 of width (leave 20% padding on right)
     my $scale_factor = ($width_px / 1.2) / $max_pattern_time_s;
+
+    if ($args{debug}) {
+        say "Overlay Debug:";
+        say "  num_patterns: " . scalar(@$patterns);
+        say "  quantum_s: $quantum_s";
+        say "  max_pattern_time_s: $max_pattern_time_s";
+        say "  scale_factor: $scale_factor";
+        for my $p (@$patterns) {
+            my $len = $p->{len_total} // 0;
+            say "  pattern '$p->{name}': len_total=$len dots, time=" . ($len * $quantum_s) . "s";
+        }
+    }
     
     # Default pattern colors (30% opacity)
     my @default_colors = (
         [255, 80, 80],      # Red
-        [255, 200, 80],     # Orange  
         [100, 255, 100],    # Green
-        [100, 200, 255],    # Blue
+        [255, 200, 80],     # Orange  
         [200, 100, 255],    # Purple
+        [100, 200, 255],    # Blue
         [255, 100, 200],    # Pink
     );
     

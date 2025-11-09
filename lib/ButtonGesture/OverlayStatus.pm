@@ -125,25 +125,34 @@ sub _draw_patterns {
     my $y_offset = 0;
     for my $i (0 .. $num_patterns - 1) {
         my $p = $self->{patterns}[$i];
-        my $len_total = $p->{len_total} // 0;
-        my $time_s = $len_total * $self->{quantum_s};
-        my $width = int($time_s * $self->{scale_factor});
-        
+
         # Get color for this pattern (cycle through palette)
         my $color_idx = $i % scalar(@{$self->{pattern_colors}});
         my ($r, $g, $b) = @{$self->{pattern_colors}[$color_idx]};
         my $color = sprintf('#%02x%02x%02x', $r, $g, $b);
-        
-        # Draw pattern rectangle with 30% opacity (stipple approximation)
-        $self->{canvas}->createRectangle(
-            0, $y_offset,
-            $width, $y_offset + $row_height,
-            -fill => $color,
-            -outline => '',
-            -stipple => 'gray50',  # Approximate 50% opacity
-            -tags => ['pattern', "pattern_$i"],
-        );
-        
+
+        # Draw each run in the pattern
+        my $x_pos = 0;
+        for my $run (@{$p->{runs}}) {
+            my $run_len = $run->{len} // 0;
+            my $time_s = $run_len * $self->{quantum_s};
+            my $width = int($time_s * $self->{scale_factor} + 0.5);
+
+            # Only draw if this is a press run (release runs are gaps/black)
+            if ($run->{type} eq 'press' || $run->{sym} eq '.') {
+                $self->{canvas}->createRectangle(
+                    $x_pos, $y_offset,
+                    $x_pos + $width, $y_offset + $row_height,
+                    -fill => $color,
+                    -outline => '',
+                    -stipple => 'gray50',  # Approximate 50% opacity
+                    -tags => ['pattern', "pattern_$i"],
+                );
+            }
+
+            $x_pos += $width;
+        }
+
         $y_offset += $row_height + $self->{pattern_spacing_y};
     }
 }

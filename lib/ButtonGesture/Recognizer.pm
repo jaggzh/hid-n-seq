@@ -100,6 +100,8 @@ sub new {
         default_var_press   => defined $a{default_var_press}   ? 0.0 + $a{default_var_press}   : 1.0,
         default_var_release => defined $a{default_var_release} ? 0.0 + $a{default_var_release} : 2.0,
         default_run_weight  => defined $a{default_run_weight}  ? 0.0 + $a{default_run_weight}  : 1.0,
+        # overlay callback (optional)
+        overlay_update      => $a{overlay_update},
         # inputs/runtime
         patterns            => $a{patterns} || [],
         callback            => $a{callback},
@@ -142,6 +144,10 @@ sub reset {
     $self->{_expecting_press} = 1;  # Reset to expecting press
     # clear per-pattern peak_done each fresh observation
     for my $p (@{$self->{patterns}}) { $p->{_peak_done} = 0.0; $p->{_ever_done} = 0; }
+    # clear overlay if present
+    if ($self->{overlay_update}) {
+        $self->{overlay_update}->([]);
+    }
 }
 
 # Runtime display toggle
@@ -311,6 +317,11 @@ sub _evaluate_if_ready {
         $self->{_events}, $self->{quantum_s}, $t, $self->{sym_press}, $self->{sym_release}
     );
     return unless @$obs_runs;
+
+    # Update overlay if callback provided
+    if ($self->{overlay_update}) {
+        $self->{overlay_update}->($obs_runs);
+    }
 
     my $obs_key = join(',', map { $_->{sym} . $_->{len} } @$obs_runs);
     if (defined $self->{_last_obs_key} && $self->{_last_obs_key} eq $obs_key) {

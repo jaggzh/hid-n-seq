@@ -11,7 +11,7 @@ sub new {
     my $patterns = $args{patterns} // [];
     my $quantum_s = $args{quantum_s} // 0.02;
     my $width_px = $args{width_px} // 200;
-    my $height_px = $args{height_px} // 30;
+    my $height_px = $args{height_px} // 20;
     my $pattern_spacing_y = $args{pattern_spacing_y_px} // 1;
     
     # Calculate max pattern length for scaling
@@ -42,7 +42,7 @@ sub new {
     my $mw = MainWindow->new();
     $mw->overrideredirect(1);  # Remove window decorations
     $mw->attributes('-topmost', 1);  # Stay on top
-    $mw->geometry("${width_px}x${height_px}+100+100");
+    $mw->geometry("${width_px}x${height_px}+100+20");
     
     # Create canvas
     my $canvas = $mw->Canvas(

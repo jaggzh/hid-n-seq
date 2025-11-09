@@ -3,6 +3,7 @@ vi:
 		Makefile \
 		wifi-gestures.yaml \
 		hidnseq \
+		lib/ButtonGesture/OverlayStatus.pm \
 		lib/ButtonGesture/Recognizer.pm \
 		hid-learn \
 		\

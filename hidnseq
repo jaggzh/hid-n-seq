@@ -6,7 +6,6 @@ use Time::HiRes qw(time usleep);
 use FindBin;
 use lib "$FindBin::Bin/lib";
 use ButtonGesture::Recognizer;
-use ButtonGesture::OverlayStatus;
 use Getopt::Long::Descriptive;
 use YAML::XS qw(LoadFile);
 use IO::Socket::INET;
@@ -102,6 +101,8 @@ sub main {
     # Create overlay unless disabled
     my $overlay;
     unless ($opt->no_overlay) {
+        require ButtonGesture::OverlayStatus;
+        ButtonGesture::OverlayStatus->import();
         $overlay = ButtonGesture::OverlayStatus->new(
             patterns => $patterns,
             quantum_s => $quantum_s,
@@ -302,7 +303,12 @@ sub main {
                             $last_feed = time();
                         }
                     } else {
-                        last if $next =~ /[A-Za-z~]$/;
+                        # Ignore other finalized term sequences that we don't care about
+                        if ($next =~ /[A-Za-z~]$/) {
+                            # my $seqshow = $seq; $seqshow =~ s/\033/^[/g; say "SEQ: {{$seqshow}}";
+                            $seq = '';
+                            next;
+                        }
                     }
                 }
             }
@@ -421,7 +427,7 @@ sub handle_gesture {
         print "at: $when  ---  ";
         if ($hardcoded) {
             if ($gesture_name eq 'click') {
-                `xdotool key Down`;
+                `xdotool key Up`;
             } elsif ($gesture_name eq 'doubleclick') {
                 `xdotool key Up`;
             } elsif ($gesture_name eq 'tripleclick') {

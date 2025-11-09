@@ -11,7 +11,7 @@ sub new {
     my $patterns = $args{patterns} // [];
     my $quantum_s = $args{quantum_s} // 0.02;
     my $width_px = $args{width_px} // 200;
-    my $height_px = $args{height_px} // 20;
+    my $height_px = $args{height_px} // 10;
     my $pattern_spacing_y = $args{pattern_spacing_y_px} // 1;
     
     # Calculate max pattern length for scaling
@@ -42,7 +42,7 @@ sub new {
     my $mw = MainWindow->new();
     $mw->overrideredirect(1);  # Remove window decorations
     $mw->attributes('-topmost', 1);  # Stay on top
-    $mw->geometry("${width_px}x${height_px}+100+20");
+    $mw->geometry("${width_px}x${height_px}+100+29");
     
     # Create canvas
     my $canvas = $mw->Canvas(
@@ -171,11 +171,13 @@ sub _start_drag {
     my $e = $widget->XEvent;
     $self->{_drag_x} = $e->x;
     $self->{_drag_y} = $e->y;
+    say "HELLO! Drag start!"
 }
 
 sub _do_drag {
     my ($self, $widget) = @_;
     my $e = $widget->XEvent;
+    say "DO DRAG!";
     
     return unless defined $self->{_drag_x} && defined $self->{_drag_y};
     

@@ -98,31 +98,14 @@ sub main {
 
     my $quantum_s = defined($file_dot_ms) ? ($file_dot_ms / 1000.0) : $opt->quantum_s;
 
-    # Create overlay unless disabled
-    my $overlay;
-    unless ($opt->no_overlay) {
-        require ButtonGesture::OverlayStatus;
-        ButtonGesture::OverlayStatus->import();
-        $overlay = ButtonGesture::OverlayStatus->new(
-            patterns => $patterns,
-            quantum_s => $quantum_s,
-            width_px => 200,
-            height_px => 50,
-            debug => 1,
-        );
-    }
-
-    # Start HIDUI unless in TUI mode
-    # unless ($tui_mode && !$hidui_mode) {
-    if (!$tui_mode && $hidui_mode) {
-        start_hidui($hidui_port);
-    }
-
+    # Create recognizer FIRST (this precomputes patterns including len_total)
+    # used by overlay.
     $recognizer = Recognizer->new(
         verbose    => $verbose,
         quantum_ms => int($quantum_s * 1000 + 0.5),
         callback   => sub { handle_gesture(@_, $tui_mode, $hidui_port, $hardcoded) },
-        overlay_update => $overlay ? sub { $overlay->update(@_) } : undef,
+        # Can't set overlay_update yet
+        #overlay_update => $overlay ? sub { $overlay->update(@_) } : undef,
         patterns   => $patterns,
         commit_threshold   => 0.45,   # still require a strong match
         commit_margin      => 0.018,   # need a bigger lead over any continuation
@@ -145,6 +128,29 @@ sub main {
         viz_display => \%viz_display,
         viz_scale => .75,
     );
+
+    # Create overlay with precomputed patterns from recognizer
+    my $overlay;
+    unless ($opt->no_overlay) {
+        require ButtonGesture::OverlayStatus;
+        ButtonGesture::OverlayStatus->import();
+        $overlay = ButtonGesture::OverlayStatus->new(
+            patterns => $recognizer->{patterns},  # Use precomputed patterns
+            quantum_s => $quantum_s,
+            width_px => 200,
+            height_px => 50,
+            debug => 1,
+        );
+        # Now set the overlay callback on the recognizer
+        $recognizer->{overlay_update} = sub { $overlay->update(@_) };
+    }
+
+    # Start HIDUI unless in TUI mode
+    # unless ($tui_mode && !$hidui_mode) {
+    if (!$tui_mode && $hidui_mode) {
+        start_hidui($hidui_port);
+    }
+
     my $idle_tick_s = $quantum_s;
     my $last_feed   = time();
 
@@ -320,10 +326,10 @@ sub main {
             $recognizer->tick(time());
             $last_feed = time();
         }
-        
+
         # Process Tk events for overlay
         $overlay->process_events() if $overlay;
-        
+
         usleep(1000);
     }
 }

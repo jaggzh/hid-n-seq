@@ -78,8 +78,8 @@ sub new {
             { min => 0.00, color => [0, 80, 0] },    # dark green
         ],
         # Pattern background color settings
-        viz_pattern_bg_saturation_range => $a{viz_pattern_bg_saturation_range} // [0.80, 1.00],
-        viz_pattern_bg_brightness_range => $a{viz_pattern_bg_brightness_range} // [0.20, 0.30],
+        viz_pattern_bg_saturation_range => $a{viz_pattern_bg_saturation_range} // [0.90, 1.00],
+        viz_pattern_bg_brightness_range => $a{viz_pattern_bg_brightness_range} // [0.10, 0.15],
         # Display toggles
         viz_display => {
             name => 1,
@@ -162,6 +162,8 @@ sub _ansi_bg    { return sprintf("\e[48;2;%d;%d;%dm", $_[0], $_[1], $_[2]); }
 sub _ansi_dim   { "\e[2m" }
 sub _ansi_boit  { "\e[1m\e[3m" }
 sub _ansi_boit_end { "\e[22m\e[23m" }
+sub _ansi_pat_name  { "\e[33;1m" }
+sub _ansi_viz_text  { _ansi_rgb(200, 180, 80) }
 
 # -----------------------------------------------------------------------------
 # External interface: feed edges and ticks
@@ -1123,7 +1125,7 @@ sub _build_pattern_line {
     if ($self->{viz_display}{name}) {
         my $name_str = sprintf("%-14s", $c->{name});
         $prefix_width += length($name_str) + 1;
-        push @parts, _ansi_boit . $name_str . _ansi_boit_end;
+        push @parts, _ansi_pat_name . $name_str . _ansi_boit_end . _ansi_viz_text;
     }
 
     # REL label field

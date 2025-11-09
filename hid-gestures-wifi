@@ -13,7 +13,7 @@ use IO::Select;
 use Term::ReadKey;
 
 my $def_file = "wifi-gestures.yaml";
-$def_file = "my-gestures.yaml";
+# $def_file = "my-gestures.yaml";
 my $def_quantum_s = 0.02;
 my $def_port = 10102;
 my $verbose = 2;
@@ -22,7 +22,9 @@ sub _ansi_bg    { return sprintf("\e[48;2;%d;%d;%dm", $_[0], $_[1], $_[2]); }
 sub _ansi_boit  { "\e[1m\e[3m" }
 sub _ansi_boit_end { "\e[22m\e[23m" }
 sub _ansi_bo  { "\e[1m" }
-my $_ansi_matched = _ansi_bg(40,155,40) . _ansi_rgb(255,255,255) . _ansi_boit;
+#my $_ansi_matched = _ansi_bg(40,155,40) . _ansi_rgb(255,255,255) . _ansi_boit;
+# my $_ansi_matched = _ansi_rgb(255,255,255) . _ansi_boit;
+my $_ansi_matched = "\e[32;1m";
 my $_ansi_score = "\e[33;1m";
 my $_ansi_reset = "\e[0m";
 
@@ -101,6 +103,7 @@ sub main {
         # keep dot-end guard unless you know you want to commit while still pressed
         require_release_for_dot_end => 1,
         viz_display => \%viz_display,
+        viz_scale => .75,
     );
     my $idle_tick_s = $quantum_s;
     my $last_feed   = time();

@@ -7,6 +7,9 @@ use File::Path qw(make_path);
 use File::Basename qw(dirname);
 use Carp qw(croak);
 
+my $json_parser = JSON::PP->new->relaxed(1);
+my $json_pp = JSON::PP->new->pretty(1);
+
 # Constructor
 # Takes config_dir path (e.g., "config/")
 sub new {
@@ -119,7 +122,7 @@ sub _load_json_file {
     my $json_text = do { local $/; <$fh> };
     close $fh;
     
-    my $data = eval { decode_json($json_text) };
+    my $data = eval { $json_parser->decode($json_text) };
     if ($@) {
         warn "Failed to parse JSON from $filepath: $@";
         return undef;
@@ -132,7 +135,7 @@ sub _load_json_file {
 sub _save_json_file {
     my ($self, $filepath, $data) = @_;
     
-    my $json_text = encode_json($data);
+    my $json_text = $json_pp->encode($data);
     
     open my $fh, '>', $filepath or do {
         warn "Could not write to $filepath: $!";

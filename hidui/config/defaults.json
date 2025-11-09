@@ -12,6 +12,12 @@
               "id": "presets_row1",
               "cells": [
                 {
+                  "id": "preset_reading",
+                  "label": "Reading",
+                  "type": "preset",
+                  "preset_id": "preset_reading"
+                },
+                {
                   "id": "preset_general",
                   "label": "General",
                   "type": "preset",
@@ -83,6 +89,17 @@
   },
   
   "presets": {
+    "preset_reading": {
+      "label": "Reading",
+      "events": {
+        "click": "key_down",
+        "doubleclick": "key_up",
+        "tripleclick": "key_down10",
+        # "mediumpress": "mouse_middle_click",
+        "longpress": "key_enter",
+        "longlongpress": "open_main_ui"
+      }
+    },
     "preset_general": {
       "label": "General Use",
       "events": {

@@ -54,6 +54,8 @@ patterns:
       0: { type: press, variance: 18.196, weight: 1.000, samples: 7 }
       1: { type: release, variance: 20.889, weight: 1.000, samples: 7 }
       2: { type: press, variance: 17.114, weight: 1.000, samples: 7 }
+      3: { type: release, variance: 20.889, weight: 1.000, samples: 7 }
+      4: { type: press, variance: 17.114, weight: 1.000, samples: 7 }
 
 # sym_press="." sym_release="~"
 # Edit per-run 'variance' (in dots) and 'weight' to tune tolerance/importance.

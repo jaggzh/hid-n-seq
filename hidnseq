@@ -15,7 +15,7 @@ use Term::ReadKey;
 my $def_file = "wifi-gestures.yaml";
 # $def_file = "my-gestures.yaml";
 my $def_quantum_s = 0.02;
-my $def_port = 10102;
+my $def_port = 10101;
 my $def_hidui_port = 9876;
 my $verbose = 2;
 sub _ansi_rgb   { return sprintf("\e[38;2;%d;%d;%dm", $_[0], $_[1], $_[2]); }
@@ -63,8 +63,10 @@ sub main {
         [ 'rmb'             => "Use Right-Mouse-Button" ],
         [],
         [ 'tui'             => "Text UI only (no HIDUI, for testing gestures)" ],
+        [ 'no-hidui'        => "No HIDUI (but still in net-button mode)" ],
+        [ 'hardcoded'       => "Use hard-coded event mappings here in hidnseq (disables hidui)" ],
         [ 'hidui-port=i'    => "HIDUI event port ($def_hidui_port)" ],
-        [ 'quantum-s|q=f'    => "Smallest resolution of sensing durations (seconds, float ($def_quantum_s)",
+        [ 'quantum-s|q=f'   => "Smallest resolution of sensing durations (seconds, float ($def_quantum_s)",
             { 'default' => $def_quantum_s, } ],
         [ 'verbose|v+'  => "Increase verbosity each time -v is used",
             { 'default' => $verbose, } ],
@@ -79,7 +81,10 @@ sub main {
 	$use_net = 1 if $opt->net;
     my $port = $opt->port // $def_port;
     my $tui_mode = $opt->tui // 0;
+    my $hidui_mode = !$opt->no_hidui;
     my $hidui_port = $opt->hidui_port // $def_hidui_port;
+    my $hardcoded = $opt->hardcoded // 0;
+    $hidui_mode = !$hardcoded;
     
     if ($opt->gesture_file) {
         die "No such YAML: " . $opt->gesture_file . "\n"
@@ -91,7 +96,8 @@ sub main {
     }
     
     # Start HIDUI unless in TUI mode
-    unless ($tui_mode) {
+    # unless ($tui_mode && !$hidui_mode) {
+    if (!$tui_mode && $hidui_mode) {
         start_hidui($hidui_port);
     }
     
@@ -99,7 +105,7 @@ sub main {
     $recognizer = Recognizer->new(
         verbose    => $verbose,
         quantum_ms => int($quantum_s * 1000 + 0.5),
-        callback   => sub { handle_gesture(@_, $tui_mode, $hidui_port) },
+        callback   => sub { handle_gesture(@_, $tui_mode, $hidui_port, $hardcoded) },
         patterns   => $patterns,
         commit_threshold   => 0.45,   # still require a strong match
         commit_margin      => 0.018,   # need a bigger lead over any continuation
@@ -389,7 +395,7 @@ sub _check_stdin {
 }
 
 sub handle_gesture {
-    my ($gesture_name, $score, $meta, $tui_mode, $hidui_port) = @_;
+    my ($gesture_name, $score, $meta, $tui_mode, $hidui_port, $hardcoded) = @_;
     my $when = ($meta && exists $meta->{t_end}) ? $meta->{t_end} : time();
     if ($gesture_name && $gesture_name eq 'NO_MATCH') {
         print "\nNo match (reset)\n";
@@ -398,13 +404,28 @@ sub handle_gesture {
         my $score_s = defined($score) ? sprintf('%.3f',$score) : '—';
         print "\nMatched: $_ansi_matched $gesture_name $_ansi_reset  score=$_ansi_score$score_s$_ansi_reset\n";
         print "at: $when  ---  ";
-        
-        # Send to HIDUI unless in TUI mode
-        unless ($tui_mode) {
-            if (send_to_hidui($gesture_name, $hidui_port)) {
-                print "[Sent to HIDUI] ";
-            } else {
-                print "[HIDUI send failed] ";
+        if ($hardcoded) {
+            if ($gesture_name eq 'click') {
+                `xdotool key Down`;
+            } elsif ($gesture_name eq 'doubleclick') {
+                `xdotool key Up`;
+            } elsif ($gesture_name eq 'tripleclick') {
+                for my $i (0 .. 10) {
+                    `xdotool key Down`;
+                }
+            } elsif ($gesture_name eq 'longpress') {
+                for my $i (0 .. 10) {
+                    `xdotool key Up`;
+                }
+            }
+        } else {
+            # Send to HIDUI if we're not doing TUI test mode (no gui)
+            if (!$tui_mode) {
+                if (send_to_hidui($gesture_name, $hidui_port)) {
+                    print "[Sent to HIDUI] ";
+                } else {
+                    print "[HIDUI send failed] ";
+                }
             }
         }
     }

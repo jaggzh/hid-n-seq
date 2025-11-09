@@ -1,7 +1,8 @@
+use v5.36;
+
 package HIDUI::Actions::Keyboard;
 
-use strict;
-use warnings;
+use bansi;
 
 # Register all keyboard actions with the registry
 sub register_all {
@@ -66,6 +67,20 @@ sub register_all {
     );
     
     $registry->register(
+        id => 'key_up10',
+        label => 'Key: Up Arrow x10',
+        group => 'keyboard_arrows',
+        handler => sub { _key_press('Up', 10) }
+    );
+    
+    $registry->register(
+        id => 'key_down10',
+        label => 'Key: Down Arrow x10',
+        group => 'keyboard_arrows',
+        handler => sub { _key_press('Down', 10) }
+    );
+    
+    $registry->register(
         id => 'key_left',
         label => 'Key: Left Arrow',
         group => 'keyboard_arrows',
@@ -105,9 +120,18 @@ sub register_all {
 
 # Internal helper to press a key
 sub _key_press {
-    my ($key_name) = @_;
+    my ($key_name, $cnt) = @_;
+    say "$bgmag$whi KEY_PRESS -- Key name: $key_name  $rst";
+    say "$bgmag$whi KEY_PRESS -- Key name: $key_name  $rst";
+    say "$bgmag$whi KEY_PRESS -- Key name: $key_name  $rst";
+    say "$bgmag$whi KEY_PRESS -- Key name: $key_name  $rst";
+    say "$bgmag$whi KEY_PRESS -- Key name: $key_name  $rst";
+    say "$bgmag$whi KEY_PRESS -- Key name: $key_name  $rst";
+    $cnt //= 1;
     return sub {
-        system('xdotool', 'key', $key_name);
+        for my $i (0 .. $cnt) {
+            system('xdotool', 'key', $key_name);
+        }
     };
 }
 

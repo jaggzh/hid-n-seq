@@ -189,6 +189,7 @@ sub main {
     }
 
     # Common display
+    say "Using gesture file: ", $opt->gesture_file;
     print "Available gestures:\n";
 	# Need to retrieve from yaml and display to user
 	# eg. print "  - click: description...\n";

@@ -36,7 +36,7 @@ sub new {
     
     $self->{toplevel}->bind('<FocusIn>', sub {
         $self->{core}->mapper->set_mode('main_ui');
-        $self->{core}->ui->{current_window} = 'main';
+        $self->{core}->ui->current_window('main');
     });
 
     return $self;
@@ -92,8 +92,7 @@ sub _build_window {
     
     # Prevent window from being closed via X button (use our close action instead)
     $self->{toplevel}->protocol('WM_DELETE_WINDOW', sub {
-        $self->hide();
-        #$self->{core}->ui->hide_main_window();
+        $self->{core}->ui->hide_main_window();
     });
     
     # Create main frame

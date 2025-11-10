@@ -30,7 +30,7 @@ sub new {
 # Check if any UI window is active
 sub active {
     my ($self) = @_;
-    return defined $self->{current_window};
+    return defined $self->current_window;
 }
 
 # Get name of current active window
@@ -39,10 +39,10 @@ sub current_window {
     
     # If called as setter (check number of args, not if defined)
     if (@_ > 1) {  # Called with an argument, even if undef
-        $self->{_current_window} = $new_value;
+        $self->{current_window} = $new_value;
     }
     
-    return $self->{_current_window};
+    return $self->{current_window};
 }
 
 
@@ -50,11 +50,11 @@ sub current_window {
 sub get_active_window_object {
     my ($self) = @_;
     
-    return undef unless $self->{current_window};
+    return undef unless $self->current_window;
     
-    if ($self->{current_window} eq 'main') {
+    if ($self->current_window eq 'main') {
         return $self->{main_window};
-    } elsif ($self->{current_window} eq 'preset_config') {
+    } elsif ($self->current_window eq 'preset_config') {
         return $self->{preset_config};
     }
     
@@ -72,7 +72,7 @@ sub show_main_window {
     
     # Show window
     $self->{main_window}->show();
-    $self->{current_window} = 'main';
+    $self->current_window('main');
     
     # Update mode in mapper
     $self->{core}->mapper->set_mode('main_ui');
@@ -85,7 +85,7 @@ sub hide_main_window {
     return unless $self->{main_window};
     
     $self->{main_window}->hide();
-    $self->{current_window} = undef;
+    $self->current_window(undef);
     
     # Return to desktop mode
     $self->{core}->mapper->set_mode('desktop_mode');
@@ -102,7 +102,7 @@ sub show_preset_config {
     
     # Show window
     $self->{preset_config}->show();
-    $self->{current_window} = 'preset_config';
+    $self->current_window('preset_config');
     
     # Update mode in mapper
     $self->{core}->mapper->set_mode('preset_config');
@@ -115,7 +115,7 @@ sub hide_preset_config {
     return unless $self->{preset_config};
     
     $self->{preset_config}->hide();
-    $self->{current_window} = undef;
+    $self->current_window(undef);
     
     # Return to desktop mode
     $self->{core}->mapper->set_mode('desktop_mode');

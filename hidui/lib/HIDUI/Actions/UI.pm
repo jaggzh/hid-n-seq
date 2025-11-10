@@ -114,10 +114,12 @@ sub close_current_window {
     
     my $current_window = $core->ui->current_window;
     
-    if ($current_window eq 'main') {
-        $core->ui->hide_main_window();
-    } elsif ($current_window eq 'preset_config') {
-        $core->ui->hide_preset_config();
+    if (defined $current_window) {
+        if ($current_window eq 'main') {
+            $core->ui->hide_main_window();
+        } elsif ($current_window eq 'preset_config') {
+            $core->ui->hide_preset_config();
+        }
     }
 }
 

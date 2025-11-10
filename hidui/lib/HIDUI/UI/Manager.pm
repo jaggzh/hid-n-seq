@@ -35,9 +35,16 @@ sub active {
 
 # Get name of current active window
 sub current_window {
-    my ($self) = @_;
-    return $self->{current_window};
+    my ($self, $new_value) = @_;
+    
+    # If called as setter (check number of args, not if defined)
+    if (@_ > 1) {  # Called with an argument, even if undef
+        $self->{_current_window} = $new_value;
+    }
+    
+    return $self->{_current_window};
 }
+
 
 # Get the actual window object for the active window
 sub get_active_window_object {

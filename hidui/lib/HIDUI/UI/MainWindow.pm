@@ -34,11 +34,6 @@ sub new {
     
     $self->_build_window();
     
-    $self->{toplevel}->bind('<FocusIn>', sub {
-        $self->{core}->mapper->set_mode('main_ui');
-        $self->{core}->ui->current_window('main');
-    });
-
     return $self;
 }
 
@@ -347,10 +342,9 @@ sub _update_ui_help {
         $text->insert('end', $event, 'event');
         $text->insert('end', ' → ');
         $text->insert('end', $action, 'action');
+        $text->insert('end', "\n");
         
-        if ($i < $#events) {
-            $text->insert('end', ' — ');
-        }
+        # if ($i < $#events) { $text->insert('end', ' — '); }
     }
 }
 

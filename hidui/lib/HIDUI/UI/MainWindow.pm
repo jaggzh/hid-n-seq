@@ -320,6 +320,14 @@ sub update_info_panels {
     $self->_update_quick_info();
 }
 
+# DEBUG: Print cell ordering
+sub debug_cells {
+    my ($self) = @_;
+
+    return unless $self->{grid};
+    $self->{grid}->debug_cells();
+}
+
 # Internal: Update text in a disabled Text widget
 sub _update_text_widget {
     my ($self, $text, $content_sub) = @_;

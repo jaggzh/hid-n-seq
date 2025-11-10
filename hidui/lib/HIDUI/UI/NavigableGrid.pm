@@ -8,12 +8,18 @@ use Tk;
 # Takes: parent (Tk widget), cells (arrayref of cell data), on_activate (callback)
 sub new {
     my ($class, %args) = @_;
-    
+
     my $parent = $args{parent} or die "NavigableGrid requires parent widget";
     my $cells = $args{cells} // [];
     my $on_activate = $args{on_activate};
     my $initial_index = $args{initial_index} // 0;
-    
+
+    # Bounds check initial_index
+    if (@$cells && $initial_index >= @$cells) {
+        warn "Initial index $initial_index is out of bounds (max " . ($#{$cells}) . "), resetting to 0\n";
+        $initial_index = 0;
+    }
+
     my $self = {
         parent => $parent,
         cells => $cells,           # Array of cell data hashes
@@ -22,55 +28,61 @@ sub new {
         on_activate => $on_activate,
         frame => undef,            # Container frame
     };
-    
+
     bless $self, $class;
-    
+
     $self->_build_ui();
     $self->_highlight_current();
-    
+
     return $self;
 }
 
 # Navigate to next cell
 sub navigate_next {
     my ($self) = @_;
-    
+
     return unless @{$self->{cells}};
-    
+
+    my $old_index = $self->{current_index};
     $self->{current_index}++;
-    
+
     # Wrap around to beginning
     if ($self->{current_index} >= @{$self->{cells}}) {
         $self->{current_index} = 0;
     }
-    
+
+    # DEBUG: Uncomment to trace navigation
+    # my $old_label = $self->{cells}[$old_index]{label} // 'unknown';
+    # my $new_label = $self->{cells}[$self->{current_index}]{label} // 'unknown';
+    # print "Navigate next: [$old_index] '$old_label' -> [$self->{current_index}] '$new_label' (total: " . scalar(@{$self->{cells}}) . ")\n";
+
     $self->_highlight_current();
 }
 
 # Navigate to previous cell
 sub navigate_prev {
     my ($self) = @_;
-    
+
     return unless @{$self->{cells}};
-    
+
     $self->{current_index}--;
-    
+
     # Wrap around to end
     if ($self->{current_index} < 0) {
         $self->{current_index} = @{$self->{cells}} - 1;
     }
-    
+
     $self->_highlight_current();
 }
 
 # Activate current cell
 sub activate_current {
     my ($self) = @_;
-    
+
     return unless @{$self->{cells}};
-    
+
     my $cell = $self->{cells}[$self->{current_index}];
-    
+
     if ($self->{on_activate}) {
         $self->{on_activate}->($cell);
     }
@@ -79,7 +91,7 @@ sub activate_current {
 # Get current cell data
 sub get_current_cell {
     my ($self) = @_;
-    
+
     return undef unless @{$self->{cells}};
     return $self->{cells}[$self->{current_index}];
 }
@@ -93,12 +105,12 @@ sub get_current_index {
 # Set current index (useful for restoring position)
 sub set_current_index {
     my ($self, $index) = @_;
-    
+
     return unless @{$self->{cells}};
-    
+
     $index = 0 if $index < 0;
     $index = $#{$self->{cells}} if $index >= @{$self->{cells}};
-    
+
     $self->{current_index} = $index;
     $self->_highlight_current();
 }
@@ -109,24 +121,40 @@ sub frame {
     return $self->{frame};
 }
 
+# DEBUG: Print cell list
+sub debug_cells {
+    my ($self) = @_;
+
+    print "\n=== NavigableGrid Cell Debug ===\n";
+    print "Total cells: " . scalar(@{$self->{cells}}) . "\n";
+    print "Current index: $self->{current_index}\n";
+    for my $i (0 .. $#{$self->{cells}}) {
+        my $cell = $self->{cells}[$i];
+        my $label = $cell->{label} // $cell->{id} // 'UNKNOWN';
+        my $marker = ($i == $self->{current_index}) ? ' <-- CURRENT' : '';
+        print "  [$i] $label$marker\n";
+    }
+    print "=================================\n\n";
+}
+
 # Internal: Build the UI
 sub _build_ui {
     my ($self) = @_;
-    
+
     # Create container frame
     $self->{frame} = $self->{parent}->Frame(
         -borderwidth => 2,
         -relief => 'groove'
     );
-    
+
     # Create buttons for each cell
     my $row = 0;
     my $col = 0;
     my $max_cols = 4;  # Layout in grid, 4 columns max
-    
+
     for my $i (0 .. $#{$self->{cells}}) {
         my $cell = $self->{cells}[$i];
-        
+
         my $button = $self->{frame}->Button(
             -text => $cell->{label} // $cell->{id},
             -width => 15,
@@ -136,11 +164,11 @@ sub _build_ui {
                 $self->activate_current();
             }
         );
-        
+
         $button->grid(-row => $row, -column => $col, -padx => 2, -pady => 2);
-        
+
         push @{$self->{buttons}}, $button;
-        
+
         # Move to next grid position
         $col++;
         if ($col >= $max_cols) {
@@ -153,14 +181,20 @@ sub _build_ui {
 # Internal: Highlight the current cell
 sub _highlight_current {
     my ($self) = @_;
-    
+
     return unless @{$self->{buttons}};
-    
+
+    # Bounds check
+    if ($self->{current_index} < 0 || $self->{current_index} >= @{$self->{buttons}}) {
+        warn "Current index $self->{current_index} is out of bounds! Resetting to 0.\n";
+        $self->{current_index} = 0;
+    }
+
     # Remove highlight from all buttons
     for my $button (@{$self->{buttons}}) {
         $button->configure(-background => 'grey90');
     }
-    
+
     # Highlight current button
     my $current_button = $self->{buttons}[$self->{current_index}];
     $current_button->configure(-background => 'yellow');
@@ -188,9 +222,12 @@ HIDUI::UI::NavigableGrid - Navigable grid of buttons
         },
         initial_index => 0
     );
-    
+
     $grid->navigate_next();
     $grid->activate_current();
+
+    # Debug:
+    $grid->debug_cells();  # Print cell list
 
 =head1 DESCRIPTION
 

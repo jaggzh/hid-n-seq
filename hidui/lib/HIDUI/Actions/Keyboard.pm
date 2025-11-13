@@ -56,28 +56,28 @@ sub register_all {
         id => 'key_up',
         label => 'Key: Up Arrow',
         group => 'keyboard_arrows',
-        handler => sub { _key_press('Up') }
+        handler => sub { _key_press('Up'); _alert_tone(430)  }
     );
     
     $registry->register(
         id => 'key_down',
         label => 'Key: Down Arrow',
         group => 'keyboard_arrows',
-        handler => sub { _key_press('Down') }
+        handler => sub { _key_press('Down'); _alert_tone(400)  }
     );
     
     $registry->register(
         id => 'key_up10',
         label => 'Key: Up Arrow x10',
         group => 'keyboard_arrows',
-        handler => sub { _key_press('Up', 10) }
+        handler => sub { _key_press('Up', 10); _alert_tone(430); _alert_tone(430) }
     );
     
     $registry->register(
         id => 'key_down10',
         label => 'Key: Down Arrow x10',
         group => 'keyboard_arrows',
-        handler => sub { _key_press('Down', 10) }
+        handler => sub { _key_press('Down', 10); _alert_tone(400); _alert_tone(400) }
     );
     
     $registry->register(
@@ -116,6 +116,13 @@ sub register_all {
             system('xdotool', 'key', '--repeat', $repeat, 'Up');
         }
     );
+}
+
+sub _alert_tone($freq, $dur=.05) {
+    system(qw(play -q -n synth),
+        $dur,
+        'sine', $freq,
+        qw(fade l .05), $dur, '.05');
 }
 
 # Internal helper to press a key

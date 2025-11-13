@@ -121,18 +121,11 @@ sub register_all {
 # Internal helper to press a key
 sub _key_press {
     my ($key_name, $cnt) = @_;
-    say "$bgmag$whi KEY_PRESS -- Key name: $key_name  $rst";
-    say "$bgmag$whi KEY_PRESS -- Key name: $key_name  $rst";
-    say "$bgmag$whi KEY_PRESS -- Key name: $key_name  $rst";
-    say "$bgmag$whi KEY_PRESS -- Key name: $key_name  $rst";
-    say "$bgmag$whi KEY_PRESS -- Key name: $key_name  $rst";
-    say "$bgmag$whi KEY_PRESS -- Key name: $key_name  $rst";
     $cnt //= 1;
-    return sub {
-        for my $i (0 .. $cnt) {
-            system('xdotool', 'key', $key_name);
-        }
-    };
+    for my $i (0 .. $cnt) {
+        say "$bgblu$whi xdotool key $key_name $rst";
+        system('xdotool', 'key', $key_name);
+    }
 }
 
 1;

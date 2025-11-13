@@ -14,12 +14,26 @@ use Tk;
 my $config_dir = "$FindBin::Bin/config";
 my $port = 9876;
 my $enable_server = 1;
+my $opt_help;
 
 GetOptions(
     'config=s' => \$config_dir,
     'port=i' => \$port,
     'server!' => \$enable_server,
-) or die "Usage: $0 [--config DIR] [--port PORT] [--no-server]\n";
+    'help|h' => \$opt_help,
+) or die "Usage: $0 [--config DIR] [--port PORT] [--no-server] [--help]\n";
+sub usage {
+    print <<~EOF;
+        Usage: $0 [--config DIR] [--port PORT] [--no-server] [--help]
+
+        Options:
+            --config DIR|-c DIR       -- Specify config directory ($config_dir)
+            --port PORT|-p PORT       -- Specify TCP port ($port)
+            --server|--no-server      -- Enable or disable server ($enable_server)
+            --help|-h                 -- Show this help message and exit
+        EOF
+}
+if ($opt_help) { usage(); exit; }
 
 my $hidui = HIDUI::Core->new(config_dir => $config_dir);
 

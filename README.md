@@ -4,6 +4,8 @@
 
 A timing-based gesture recognizer for **one physical button** (e.g., an accessibility switch). It lets users trigger rich actions (click, double-click, menu, long-press, custom sequences) by **press/release timing patterns** rather than multiple buttons.
 
+[Project Repository: https://github.com/jaggzh/hid-n-seq](https://github.com/jaggzh/hid-n-seq)
+
 This document explains **why it exists**, **how it works** (conceptually and mathematically), and **where** to change things in code. It’s optimized so another LLM or engineer can jump in cold and still make safe edits.
 
 *This is a general purpose Perl module to process **press** and **release** events.** In my case, it's being incorporated into a little server script that receives a WiFi mouse button's transmissions.*

@@ -208,7 +208,12 @@ sub main {
     if ($use_net) {
         print "Waiting for network connection. Press 'q' or Ctrl-C to quit.\n";
     } else {
-        print "Left-click anywhere to test gestures. Press 'q' or Ctrl-C to quit.\n";
+        print ($watch_btn==0) ? "Left-click"
+            : ($watch_btn == 1) ? "Middle-click" :
+            : ($watch_btn == 2) ? "Right-click" :
+            'Internal-error-in-button-selection';
+        print " anywhere to test gestures. Press 'q' or Ctrl-C to quit.\n";
+        print "'a' for a fake press-event. 's' or 'f' as a release.\n";
     }
     print "-" x 60 . "\n\n";
 
@@ -224,6 +229,10 @@ sub main {
             if ($c eq "q") {
                 say "QUIT";
                 last;
+            } elsif ($c eq 'a') {
+                $recognizer->press(time());
+            } elsif ($c eq 'f' || $c eq 's') {
+                $recognizer->release(time());
             } elsif ($c eq "\n") {
                 print "\n" x 50;
             } elsif (!$use_net && $c eq "\e") {
@@ -292,7 +301,7 @@ sub main {
                     say "QUIT\n";
                     last;
                 } elsif ($c eq "\n") {
-                    print "\n" x 50;
+                    print "\n" x 10;
                 } elsif ($c eq "\e") {
                     my $seq = $c;
                     my $next;
